@@ -1,0 +1,19 @@
+[package]
+name = "async-fn-stream"
+description = "Lightweight implementation of `async-stream` without macros"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+homepage = "https://github.com/dmitryvk/async-fn-stream"
+repository = "https://github.com/dmitryvk/async-fn-stream"
+keywords = ["async", "stream"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures = "0.3"
+pin-project-lite = "0.2"
+
+[dev-dependencies]
+anyhow = "1"
+tokio = { version = "1.0", features = ["full"] }
