@@ -93,18 +93,18 @@ use futures::{Future, FutureExt, Stream};
 use pin_project_lite::pin_project;
 
 /// An intemediary that transfers values from stream to its consumer
-pub struct StreamEmitter<T: Send> {
+pub struct StreamEmitter<T> {
     inner: Arc<Mutex<Inner<T>>>,
 }
 
-struct Inner<T: Send> {
+struct Inner<T> {
     value: Option<T>,
     waker: Option<Waker>,
 }
 
 pin_project! {
     /// Implementation of [`Stream`] trait created by [`fn_stream`].
-    pub struct FnStream<T: Send, Fut: Future<Output = ()>> {
+    pub struct FnStream<T, Fut: Future<Output = ()>> {
         #[pin]
         fut: Fut,
         inner: Arc<Mutex<Inner<T>>>,
@@ -130,13 +130,13 @@ pin_project! {
 ///     })
 /// }
 /// ```
-pub fn fn_stream<T: Send, Fut: Future<Output = ()>>(
+pub fn fn_stream<T, Fut: Future<Output = ()>>(
     func: impl FnOnce(StreamEmitter<T>) -> Fut,
 ) -> FnStream<T, Fut> {
     FnStream::new(func)
 }
 
-impl<T: Send, Fut: Future<Output = ()>> FnStream<T, Fut> {
+impl<T, Fut: Future<Output = ()>> FnStream<T, Fut> {
     fn new<F: FnOnce(StreamEmitter<T>) -> Fut>(func: F) -> Self {
         let inner = Arc::new(Mutex::new(Inner {
             value: None,
@@ -150,7 +150,7 @@ impl<T: Send, Fut: Future<Output = ()>> FnStream<T, Fut> {
     }
 }
 
-impl<T: Send, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
+impl<T, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
     type Item = T;
 
     fn poll_next(
@@ -195,7 +195,7 @@ impl<T: Send, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
 ///     })
 /// }
 /// ```
-pub fn try_fn_stream<T: Send, E: Send, Fut: Future<Output = Result<(), E>>>(
+pub fn try_fn_stream<T, E, Fut: Future<Output = Result<(), E>>>(
     func: impl FnOnce(StreamEmitter<T>) -> Fut,
 ) -> TryFnStream<T, E, Fut> {
     TryFnStream::new(func)
@@ -203,7 +203,7 @@ pub fn try_fn_stream<T: Send, E: Send, Fut: Future<Output = Result<(), E>>>(
 
 pin_project! {
     /// Implementation of [`Stream`] trait created by [`try_fn_stream`].
-    pub struct TryFnStream<T: Send, E: Send, Fut: Future<Output = Result<(), E>>> {
+    pub struct TryFnStream<T, E, Fut: Future<Output = Result<(), E>>> {
         is_err: bool,
         #[pin]
         fut: Fut,
@@ -211,7 +211,7 @@ pin_project! {
     }
 }
 
-impl<T: Send, E: Send, Fut: Future<Output = Result<(), E>>> TryFnStream<T, E, Fut> {
+impl<T, E, Fut: Future<Output = Result<(), E>>> TryFnStream<T, E, Fut> {
     fn new<F: FnOnce(StreamEmitter<T>) -> Fut>(func: F) -> Self {
         let inner = Arc::new(Mutex::new(Inner {
             value: None,
@@ -229,7 +229,7 @@ impl<T: Send, E: Send, Fut: Future<Output = Result<(), E>>> TryFnStream<T, E, Fu
     }
 }
 
-impl<T: Send, E: Send, Fut: Future<Output = Result<(), E>>> Stream for TryFnStream<T, E, Fut> {
+impl<T, E, Fut: Future<Output = Result<(), E>>> Stream for TryFnStream<T, E, Fut> {
     type Item = Result<T, E>;
 
     fn poll_next(
@@ -259,7 +259,7 @@ impl<T: Send, E: Send, Fut: Future<Output = Result<(), E>>> Stream for TryFnStre
     }
 }
 
-impl<T: Send> StreamEmitter<T> {
+impl<T> StreamEmitter<T> {
     /// Emit value from a stream and wait until stream consumer calls [`futures::StreamExt::next`] again.
     ///
     /// # Panics
@@ -327,6 +327,28 @@ mod tests {
             assert_eq!(None, stream.next().await);
         });
     }
+
+    #[test]
+    fn infallible_lifetime() {
+        let a = 1;
+        executor::block_on(async {
+            let b = 2;
+            let a = &a;
+            let b = &b;
+            let stream = fn_stream(|collector| async move {
+                eprintln!("stream 1");
+                collector.emit(a).await;
+                eprintln!("stream 2");
+                collector.emit(b).await;
+                eprintln!("stream 3");
+            });
+            pin_mut!(stream);
+            assert_eq!(Some(a), stream.next().await);
+            assert_eq!(Some(b), stream.next().await);
+            assert_eq!(None, stream.next().await);
+        });
+    }
+
     #[test]
     #[should_panic]
     fn infallible_panics_on_multiple_collects() {
@@ -344,6 +366,7 @@ mod tests {
             assert_eq!(None, stream.next().await);
         });
     }
+
     #[test]
     fn fallible_works() {
         executor::block_on(async {
@@ -360,5 +383,35 @@ mod tests {
             assert_eq!(2, stream.next().await.unwrap().unwrap());
             assert!(stream.next().await.unwrap().err().is_some());
         });
+    }
+
+    #[test]
+    fn method_async() {
+        struct St {
+            a: String,
+        }
+
+        impl St {
+            async fn f1(&self) -> impl Stream<Item = &str> {
+                self.f2().await
+            }
+
+            async fn f2(&self) -> impl Stream<Item = &str> {
+                fn_stream(|collector| async move {
+                    collector.emit(self.a.as_str()).await;
+                    collector.emit(self.a.as_str()).await;
+                    collector.emit(self.a.as_str()).await;
+                })
+            }
+        }
+
+        executor::block_on(async {
+            let l = St {
+                a: "qwe".to_owned(),
+            };
+            let s = l.f1().await;
+            let z: Vec<&str> = s.collect().await;
+            assert_eq!(z, ["qwe", "qwe", "qwe"]);
+        })
     }
 }
