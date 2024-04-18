@@ -307,7 +307,6 @@ impl Future for CollectFuture {
 mod tests {
     use std::io::ErrorKind;
 
-    use futures_executor;
     use futures_util::{pin_mut, StreamExt};
 
     use super::*;
