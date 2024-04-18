@@ -22,7 +22,7 @@
 //!
 //! ```rust
 //! use async_fn_stream::fn_stream;
-//! use futures::Stream;
+//! use futures_util::Stream;
 //!
 //! fn build_stream() -> impl Stream<Item = i32> {
 //!     fn_stream(|emitter| async move {
@@ -39,7 +39,7 @@
 //! ```rust
 //! use anyhow::Context;
 //! use async_fn_stream::try_fn_stream;
-//! use futures::{pin_mut, Stream, StreamExt};
+//! use futures_util::{pin_mut, Stream, StreamExt};
 //! use tokio::{
 //!     fs::File,
 //!     io::{AsyncBufReadExt, BufReader},
@@ -89,7 +89,7 @@ use std::{
     task::{Poll, Waker},
 };
 
-use futures::{Future, FutureExt, Stream};
+use futures_util::{Future, FutureExt, Stream};
 use pin_project_lite::pin_project;
 
 /// An intemediary that transfers values from stream to its consumer
@@ -119,7 +119,7 @@ pin_project! {
 ///
 /// ```rust
 /// use async_fn_stream::fn_stream;
-/// use futures::Stream;
+/// use futures_util::Stream;
 ///
 /// fn build_stream() -> impl Stream<Item = i32> {
 ///     fn_stream(|emitter| async move {
@@ -181,7 +181,7 @@ impl<T, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
 /// # Example
 /// ```rust
 /// use async_fn_stream::try_fn_stream;
-/// use futures::Stream;
+/// use futures_util::Stream;
 ///
 /// fn build_stream() -> impl Stream<Item = Result<i32, anyhow::Error>> {
 ///     try_fn_stream(|emitter| async move {
@@ -260,7 +260,7 @@ impl<T, E, Fut: Future<Output = Result<(), E>>> Stream for TryFnStream<T, E, Fut
 }
 
 impl<T> StreamEmitter<T> {
-    /// Emit value from a stream and wait until stream consumer calls [`futures::StreamExt::next`] again.
+    /// Emit value from a stream and wait until stream consumer calls [`futures_util::StreamExt::next`] again.
     ///
     /// # Panics
     /// Will panic if:
@@ -307,13 +307,13 @@ impl Future for CollectFuture {
 mod tests {
     use std::io::ErrorKind;
 
-    use futures::{executor, pin_mut, StreamExt};
+    use futures_util::{pin_mut, StreamExt};
 
     use super::*;
 
     #[test]
     fn infallible_works() {
-        executor::block_on(async {
+        futures_executor::block_on(async {
             let stream = fn_stream(|collector| async move {
                 eprintln!("stream 1");
                 collector.emit(1).await;
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn infallible_lifetime() {
         let a = 1;
-        executor::block_on(async {
+        futures_executor::block_on(async {
             let b = 2;
             let a = &a;
             let b = &b;
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn infallible_panics_on_multiple_collects() {
-        executor::block_on(async {
+        futures_executor::block_on(async {
             #[allow(unused_must_use)]
             let stream = fn_stream(|collector| async move {
                 eprintln!("stream 1");
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn fallible_works() {
-        executor::block_on(async {
+        futures_executor::block_on(async {
             let stream = try_fn_stream(|collector| async move {
                 eprintln!("try stream 1");
                 collector.emit(1).await;
@@ -405,7 +405,7 @@ mod tests {
             }
         }
 
-        executor::block_on(async {
+        futures_executor::block_on(async {
             let l = St {
                 a: "qwe".to_owned(),
             };

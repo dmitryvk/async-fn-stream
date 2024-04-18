@@ -2,7 +2,7 @@ use std::env::args;
 
 use anyhow::Context;
 use async_fn_stream::try_fn_stream;
-use futures::{pin_mut, Stream, StreamExt};
+use futures_util::{pin_mut, Stream, StreamExt};
 use tokio::{
     fs::File,
     io::{AsyncBufReadExt, BufReader},

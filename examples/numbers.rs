@@ -1,5 +1,5 @@
 use async_fn_stream::fn_stream;
-use futures::{pin_mut, Stream, StreamExt};
+use futures_util::{pin_mut, Stream, StreamExt};
 
 fn build_stream() -> impl Stream<Item = i32> {
     fn_stream(|emitter| async move {
@@ -24,5 +24,5 @@ async fn example() {
 }
 
 pub fn main() {
-    futures::executor::block_on(example());
+    futures_executor::block_on(example());
 }
