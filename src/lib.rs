@@ -291,6 +291,23 @@ impl<T> StreamEmitter<T> {
 }
 
 impl<T, E> TryStreamEmitter<T, E> {
+    fn internal_emit(&self, res: Result<T, E>) -> CollectFuture {
+        let mut inner = self.inner.lock().expect("Mutex was poisoned");
+        let inner = &mut *inner;
+        if inner.value.is_some() {
+            panic!(
+                "Collector::collect() was called without `.await`'ing result of previous collect"
+            )
+        }
+        inner.value = Some(res);
+        inner
+            .waker
+            .take()
+            .expect("Collector::collect() should only be called in context of Future::poll()")
+            .wake();
+        CollectFuture { polled: false }
+    }
+    
     /// Emit value from a stream and wait until stream consumer calls [`futures_util::StreamExt::next`] again.
     ///
     /// # Panics
@@ -299,20 +316,7 @@ impl<T, E> TryStreamEmitter<T, E> {
     /// * `collect` is called not in context of polling the stream
     #[must_use = "Ensure that collect() is awaited"]
     pub fn emit(&self, value: T) -> CollectFuture {
-        let mut inner = self.inner.lock().expect("Mutex was poisoned");
-        let inner = &mut *inner;
-        if inner.value.is_some() {
-            panic!(
-                "Collector::collect() was called without `.await`'ing result of previous collect"
-            )
-        }
-        inner.value = Some(Ok(value));
-        inner
-            .waker
-            .take()
-            .expect("Collector::collect() should only be called in context of Future::poll()")
-            .wake();
-        CollectFuture { polled: false }
+        self.internal_emit(Ok(value))
     }
 
     /// Emit error from a stream and wait until stream consumer calls [`futures_util::StreamExt::next`] again.
@@ -323,20 +327,7 @@ impl<T, E> TryStreamEmitter<T, E> {
     /// * `collect` is called not in context of polling the stream
     #[must_use = "Ensure that collect() is awaited"]
     pub fn emit_err(&self, err: E) -> CollectFuture {
-        let mut inner = self.inner.lock().expect("Mutex was poisoned");
-        let inner = &mut *inner;
-        if inner.value.is_some() {
-            panic!(
-                "Collector::collect() was called without `.await`'ing result of previous collect"
-            )
-        }
-        inner.value = Some(Err(err));
-        inner
-            .waker
-            .take()
-            .expect("Collector::collect() should only be called in context of Future::poll()")
-            .wake();
-        CollectFuture { polled: false }
+        self.internal_emit(Err(err))
     }
 }
 
