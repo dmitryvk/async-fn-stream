@@ -436,7 +436,30 @@ mod tests {
             pin_mut!(stream);
             assert_eq!(1, stream.next().await.unwrap().unwrap());
             assert_eq!(2, stream.next().await.unwrap().unwrap());
-            assert!(stream.next().await.unwrap().err().is_some());
+            assert!(stream.next().await.unwrap().is_err());
+            assert!(stream.next().await.is_none());
+        });
+    }
+
+    #[test]
+    fn fallible_emit_err_works() {
+        futures_executor::block_on(async {
+            let stream = try_fn_stream(|collector| async move {
+                eprintln!("try stream 1");
+                collector.emit(1).await;
+                eprintln!("try stream 2");
+                collector.emit(2).await;
+                eprintln!("try stream 3");
+                collector.emit_err(std::io::Error::from(ErrorKind::Other)).await;
+                eprintln!("try stream 4");
+                Err(std::io::Error::from(ErrorKind::Other))
+            });
+            pin_mut!(stream);
+            assert_eq!(1, stream.next().await.unwrap().unwrap());
+            assert_eq!(2, stream.next().await.unwrap().unwrap());
+            assert!(stream.next().await.unwrap().is_err());
+            assert!(stream.next().await.unwrap().is_err());
+            assert!(stream.next().await.is_none());
         });
     }
 
