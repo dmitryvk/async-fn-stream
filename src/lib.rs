@@ -97,6 +97,11 @@ pub struct StreamEmitter<T> {
     inner: Arc<Mutex<Inner<T>>>,
 }
 
+/// An intemediary that transfers values from stream to its consumer
+pub struct TryStreamEmitter<T, E> {
+    inner: Arc<Mutex<Inner<Result<T, E>>>>,
+}
+
 struct Inner<T> {
     value: Option<T>,
     waker: Option<Waker>,
@@ -196,7 +201,7 @@ impl<T, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
 /// }
 /// ```
 pub fn try_fn_stream<T, E, Fut: Future<Output = Result<(), E>>>(
-    func: impl FnOnce(StreamEmitter<T>) -> Fut,
+    func: impl FnOnce(TryStreamEmitter<T, E>) -> Fut,
 ) -> TryFnStream<T, E, Fut> {
     TryFnStream::new(func)
 }
@@ -207,17 +212,17 @@ pin_project! {
         is_err: bool,
         #[pin]
         fut: Fut,
-        inner: Arc<Mutex<Inner<T>>>,
+        inner: Arc<Mutex<Inner<Result<T, E>>>>,
     }
 }
 
 impl<T, E, Fut: Future<Output = Result<(), E>>> TryFnStream<T, E, Fut> {
-    fn new<F: FnOnce(StreamEmitter<T>) -> Fut>(func: F) -> Self {
+    fn new<F: FnOnce(TryStreamEmitter<T, E>) -> Fut>(func: F) -> Self {
         let inner = Arc::new(Mutex::new(Inner {
             value: None,
             waker: None,
         }));
-        let collector = StreamEmitter {
+        let collector = TryStreamEmitter {
             inner: inner.clone(),
         };
         let fut = func(collector);
@@ -252,7 +257,7 @@ impl<T, E, Fut: Future<Output = Result<(), E>>> Stream for TryFnStream<T, E, Fut
                 let value = this.inner.lock().expect("Mutex was poisoned").value.take();
                 match value {
                     None => Poll::Pending,
-                    Some(value) => Poll::Ready(Some(Ok(value))),
+                    Some(value) => Poll::Ready(Some(value)),
                 }
             }
         }
@@ -282,6 +287,47 @@ impl<T> StreamEmitter<T> {
             .expect("Collector::collect() should only be called in context of Future::poll()")
             .wake();
         CollectFuture { polled: false }
+    }
+}
+
+impl<T, E> TryStreamEmitter<T, E> {
+    fn internal_emit(&self, res: Result<T, E>) -> CollectFuture {
+        let mut inner = self.inner.lock().expect("Mutex was poisoned");
+        let inner = &mut *inner;
+        if inner.value.is_some() {
+            panic!(
+                "Collector::collect() was called without `.await`'ing result of previous collect"
+            )
+        }
+        inner.value = Some(res);
+        inner
+            .waker
+            .take()
+            .expect("Collector::collect() should only be called in context of Future::poll()")
+            .wake();
+        CollectFuture { polled: false }
+    }
+    
+    /// Emit value from a stream and wait until stream consumer calls [`futures_util::StreamExt::next`] again.
+    ///
+    /// # Panics
+    /// Will panic if:
+    /// * `collect` is called twice without awaiting result of first call
+    /// * `collect` is called not in context of polling the stream
+    #[must_use = "Ensure that collect() is awaited"]
+    pub fn emit(&self, value: T) -> CollectFuture {
+        self.internal_emit(Ok(value))
+    }
+
+    /// Emit error from a stream and wait until stream consumer calls [`futures_util::StreamExt::next`] again.
+    ///
+    /// # Panics
+    /// Will panic if:
+    /// * `collect` is called twice without awaiting result of first call
+    /// * `collect` is called not in context of polling the stream
+    #[must_use = "Ensure that collect() is awaited"]
+    pub fn emit_err(&self, err: E) -> CollectFuture {
+        self.internal_emit(Err(err))
     }
 }
 
@@ -381,7 +427,30 @@ mod tests {
             pin_mut!(stream);
             assert_eq!(1, stream.next().await.unwrap().unwrap());
             assert_eq!(2, stream.next().await.unwrap().unwrap());
-            assert!(stream.next().await.unwrap().err().is_some());
+            assert!(stream.next().await.unwrap().is_err());
+            assert!(stream.next().await.is_none());
+        });
+    }
+
+    #[test]
+    fn fallible_emit_err_works() {
+        futures_executor::block_on(async {
+            let stream = try_fn_stream(|collector| async move {
+                eprintln!("try stream 1");
+                collector.emit(1).await;
+                eprintln!("try stream 2");
+                collector.emit(2).await;
+                eprintln!("try stream 3");
+                collector.emit_err(std::io::Error::from(ErrorKind::Other)).await;
+                eprintln!("try stream 4");
+                Err(std::io::Error::from(ErrorKind::Other))
+            });
+            pin_mut!(stream);
+            assert_eq!(1, stream.next().await.unwrap().unwrap());
+            assert_eq!(2, stream.next().await.unwrap().unwrap());
+            assert!(stream.next().await.unwrap().is_err());
+            assert!(stream.next().await.unwrap().is_err());
+            assert!(stream.next().await.is_none());
         });
     }
 
