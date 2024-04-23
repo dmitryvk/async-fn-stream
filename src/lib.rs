@@ -1,87 +1,4 @@
-//! A version of [async-stream](https://github.com/tokio-rs/async-stream) without macros.
-//! This crate provides generic implementations of [`Stream`] trait.
-//! [`Stream`] is an asynchronous version of [`std::iter::Iterator`].
-//!
-//! Two functions are provided - [`fn_stream`] and [`try_fn_stream`].
-//!
-//! # Usage
-//!
-//! If you need to create a stream that may result in error, use [`try_fn_stream`], otherwise use [`fn_stream`].
-//!
-//! To create a stream:
-//!
-//! 1.  Invoke [`fn_stream`] or [`try_fn_stream`], passing a closure (anonymous function).
-//! 2.  Closure will accept an `emitter`.
-//!     To return value from the stream, call `.emit(value)` on `emitter` and `.await` on its result.
-//!     Once stream consumer has processed the value and called `.next()` on stream, `.await` will return.
-//! 3.  (for [`try_fn_stream`] only) Return errors from closure via `return Err(...)` or `?` (question mark) operator.
-//!
-//! # Examples
-//!
-//! Finite stream of numbers
-//!
-//! ```rust
-//! use async_fn_stream::fn_stream;
-//! use futures_util::Stream;
-//!
-//! fn build_stream() -> impl Stream<Item = i32> {
-//!     fn_stream(|emitter| async move {
-//!         for i in 0..3 {
-//!             // yield elements from stream via `emitter`
-//!             emitter.emit(i).await;
-//!         }
-//!     })
-//! }
-//! ```
-//!
-//! Read numbers from text file, with error handling
-//!
-//! ```rust
-//! use anyhow::Context;
-//! use async_fn_stream::try_fn_stream;
-//! use futures_util::{pin_mut, Stream, StreamExt};
-//! use tokio::{
-//!     fs::File,
-//!     io::{AsyncBufReadExt, BufReader},
-//! };
-//!
-//! fn read_numbers(file_name: String) -> impl Stream<Item = Result<i32, anyhow::Error>> {
-//!     try_fn_stream(|emitter| async move {
-//!         // Return errors via `?` operator.
-//!         let file = BufReader::new(File::open(file_name).await.context("Failed to open file")?);
-//!         pin_mut!(file);
-//!         let mut line = String::new();
-//!         loop {
-//!             line.clear();
-//!             let byte_count = file
-//!                 .read_line(&mut line)
-//!                 .await
-//!                 .context("Failed to read line")?;
-//!             if byte_count == 0 {
-//!                 break;
-//!             }
-//!
-//!             for token in line.split_ascii_whitespace() {
-//!                 let number: i32 = token
-//!                     .parse()
-//!                     .with_context(|| format!("Failed to conver string \"{token}\" to number"))?;
-//!                 // Return errors via `?` operator.
-//!                 emitter.emit(number).await;
-//!             }
-//!         }
-//!
-//!         Ok(())
-//!     })
-//! }
-//! ```
-//!
-//! # Why not `async-stream`?
-//!
-//! [async-stream](https://github.com/tokio-rs/async-stream) is great!
-//! It has a nice syntax, but it is based on macros which brings some flaws:
-//! * proc-macros sometimes interacts badly with IDEs such as rust-analyzer or IntelliJ Rust.
-//!   see e.g. <https://github.com/rust-lang/rust-analyzer/issues/11533>
-//! * proc-macros may increase build times
+#![doc = include_str!("../README.md")]
 
 use std::{
     pin::Pin,
@@ -92,12 +9,12 @@ use std::{
 use futures_util::{Future, FutureExt, Stream};
 use pin_project_lite::pin_project;
 
-/// An intemediary that transfers values from stream to its consumer
+/// An intermediary that transfers values from stream to its consumer
 pub struct StreamEmitter<T> {
     inner: Arc<Mutex<Inner<T>>>,
 }
 
-/// An intemediary that transfers values from stream to its consumer
+/// An intermediary that transfers values from stream to its consumer
 pub struct TryStreamEmitter<T, E> {
     inner: Arc<Mutex<Inner<Result<T, E>>>>,
 }
@@ -147,10 +64,10 @@ impl<T, Fut: Future<Output = ()>> FnStream<T, Fut> {
             value: None,
             waker: None,
         }));
-        let collector = StreamEmitter {
+        let emitter = StreamEmitter {
             inner: inner.clone(),
         };
-        let fut = func(collector);
+        let fut = func(emitter);
         Self { fut, inner }
     }
 }
@@ -181,7 +98,11 @@ impl<T, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
 
 /// Create a new fallible stream which is implemented by `func`.
 ///
-/// Caller should pass an async function which will return successive stream elements via [`StreamEmitter::emit`] or returns errors as [`Result::Err`].
+/// Caller should pass an async function which can:
+///
+/// - return successive stream elements via [`StreamEmitter::emit`]
+/// - return transient errors via [`StreamEmitter::emit_err`]
+/// - return fatal errors as [`Result::Err`]
 ///
 /// # Example
 /// ```rust
@@ -195,7 +116,10 @@ impl<T, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
 ///             emitter.emit(i).await;
 ///         }
 ///
-///         // return errors as `Result::Err`
+///         // return errors view emitter without ending the stream
+///         emitter.emit_err(anyhow::anyhow!("An error happened"));
+///
+///         // return errors from stream, ending the stream
 ///         Err(anyhow::anyhow!("An error happened"))
 ///     })
 /// }
@@ -222,10 +146,10 @@ impl<T, E, Fut: Future<Output = Result<(), E>>> TryFnStream<T, E, Fut> {
             value: None,
             waker: None,
         }));
-        let collector = TryStreamEmitter {
+        let emitter = TryStreamEmitter {
             inner: inner.clone(),
         };
-        let fut = func(collector);
+        let fut = func(emitter);
         Self {
             is_err: false,
             fut,
@@ -269,22 +193,20 @@ impl<T> StreamEmitter<T> {
     ///
     /// # Panics
     /// Will panic if:
-    /// * `collect` is called twice without awaiting result of first call
-    /// * `collect` is called not in context of polling the stream
-    #[must_use = "Ensure that collect() is awaited"]
+    /// * `emit` is called twice without awaiting result of first call
+    /// * `emit` is called not in context of polling the stream
+    #[must_use = "Ensure that emit() is awaited"]
     pub fn emit(&self, value: T) -> CollectFuture {
         let mut inner = self.inner.lock().expect("Mutex was poisoned");
         let inner = &mut *inner;
         if inner.value.is_some() {
-            panic!(
-                "Collector::collect() was called without `.await`'ing result of previous collect"
-            )
+            panic!("StreamEmitter::emit() was called without `.await`'ing result of previous emit")
         }
         inner.value = Some(value);
         inner
             .waker
             .take()
-            .expect("Collector::collect() should only be called in context of Future::poll()")
+            .expect("StreamEmitter::emit() should only be called in context of Future::poll()")
             .wake();
         CollectFuture { polled: false }
     }
@@ -296,25 +218,25 @@ impl<T, E> TryStreamEmitter<T, E> {
         let inner = &mut *inner;
         if inner.value.is_some() {
             panic!(
-                "Collector::collect() was called without `.await`'ing result of previous collect"
+                "TreStreamEmitter::emit/emit_err() was called without `.await`'ing result of previous collect"
             )
         }
         inner.value = Some(res);
         inner
             .waker
             .take()
-            .expect("Collector::collect() should only be called in context of Future::poll()")
+            .expect("TreStreamEmitter::emit/emit_err() should only be called in context of Future::poll()")
             .wake();
         CollectFuture { polled: false }
     }
-    
+
     /// Emit value from a stream and wait until stream consumer calls [`futures_util::StreamExt::next`] again.
     ///
     /// # Panics
     /// Will panic if:
-    /// * `collect` is called twice without awaiting result of first call
-    /// * `collect` is called not in context of polling the stream
-    #[must_use = "Ensure that collect() is awaited"]
+    /// * `emit`/`emit_err` is called twice without awaiting result of the first call
+    /// * `emit` is called not in context of polling the stream
+    #[must_use = "Ensure that emit() is awaited"]
     pub fn emit(&self, value: T) -> CollectFuture {
         self.internal_emit(Ok(value))
     }
@@ -323,9 +245,9 @@ impl<T, E> TryStreamEmitter<T, E> {
     ///
     /// # Panics
     /// Will panic if:
-    /// * `collect` is called twice without awaiting result of first call
-    /// * `collect` is called not in context of polling the stream
-    #[must_use = "Ensure that collect() is awaited"]
+    /// * `emit`/`emit_err` is called twice without awaiting result of the first call
+    /// * `emit_err` is called not in context of polling the stream
+    #[must_use = "Ensure that emit_err() is awaited"]
     pub fn emit_err(&self, err: E) -> CollectFuture {
         self.internal_emit(Err(err))
     }
@@ -441,7 +363,9 @@ mod tests {
                 eprintln!("try stream 2");
                 collector.emit(2).await;
                 eprintln!("try stream 3");
-                collector.emit_err(std::io::Error::from(ErrorKind::Other)).await;
+                collector
+                    .emit_err(std::io::Error::from(ErrorKind::Other))
+                    .await;
                 eprintln!("try stream 4");
                 Err(std::io::Error::from(ErrorKind::Other))
             });

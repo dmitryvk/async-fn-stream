@@ -6,6 +6,8 @@ Two functions are provided - `fn_stream` and `try_fn_stream`.
 
 # Usage
 
+## Basic Usage
+
 If you need to create a stream that may result in error, use `try_fn_stream`, otherwise use `fn_stream`.
 
 To create a stream:
@@ -14,7 +16,14 @@ To create a stream:
 2.  Closure will accept an `emitter`.
     To return value from the stream, call `.emit(value)` on `emitter` and `.await` on its result.
     Once stream consumer has processed the value and called `.next()` on stream, `.await` will return.
-3.  (for `try_fn_stream` only) Return errors from closure via `return Err(...)` or `?` (question mark) operator.
+
+## Returning errors
+
+`try_fn_stream` provides some conveniences for returning errors:
+
+1. Errors can be return from closure via `return Err(...)` or the question mark (`?`) operator.
+   This will end the stream.
+2. An `emitter` also has an `emit_err()` method to return errors without ending the stream.
 
 # Examples
 
@@ -62,10 +71,13 @@ fn read_numbers(file_name: String) -> impl Stream<Item = Result<i32, anyhow::Err
             }
 
             for token in line.split_ascii_whitespace() {
-                let number: i32 = token
-                    .parse()
-                    .with_context(|| format!("Failed to conver string \"{token}\" to number"))?;
-                // Return errors via `?` operator.
+                let Ok(number) = token.parse::<i32>() else {
+                    // Return errors via the `emit_err` method.
+                    emitter.emit_err(
+                        anyhow::anyhow!("Failed to convert string \"{token}\" to number")
+                    ).await;
+                    continue;
+                };
                 emitter.emit(number).await;
             }
         }
