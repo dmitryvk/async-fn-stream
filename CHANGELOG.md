@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.2] - 2024-04-23
+
+### 🚀 Features
+
+- Implement emit_err for try_fn_stream
+
+### 🚜 Refactor
+
+- Use internal_emit instead of duplicate code
+
+### 📚 Documentation
+
+- Improve documentation and some panic messages
+
+### 🧪 Testing
+
+- Add test for emit_err
+
 ## [0.2.1] - 2024-04-18
 
 ### 🚜 Refactor
