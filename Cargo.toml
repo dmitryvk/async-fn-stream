@@ -10,6 +10,9 @@ keywords = ["async", "stream"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+async_iterator = []
+
 [dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 pin-project-lite = "0.2"

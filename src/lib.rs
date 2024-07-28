@@ -1,4 +1,5 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(feature = "async_iterator", feature(async_iterator))]
 
 use std::{
     pin::Pin,
@@ -8,6 +9,9 @@ use std::{
 
 use futures_util::{Future, FutureExt, Stream};
 use pin_project_lite::pin_project;
+
+#[cfg(feature = "async_iterator")]
+mod async_iterator;
 
 /// An intermediary that transfers values from stream to its consumer
 pub struct StreamEmitter<T> {
