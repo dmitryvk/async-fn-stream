@@ -2,6 +2,7 @@
 
 use std::{
     pin::Pin,
+    string::String,
     sync::{Arc, Mutex},
     task::{Poll, Waker},
 };
