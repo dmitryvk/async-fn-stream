@@ -199,9 +199,10 @@ impl<T> StreamEmitter<T> {
     pub fn emit(&self, value: T) -> CollectFuture {
         let mut inner = self.inner.lock().expect("Mutex was poisoned");
         let inner = &mut *inner;
-        if inner.value.is_some() {
-            panic!("StreamEmitter::emit() was called without `.await`'ing result of previous emit")
-        }
+        assert!(
+            inner.value.is_none(),
+            "StreamEmitter::emit() was called without `.await`'ing result of previous emit"
+        );
         inner.value = Some(value);
         inner
             .waker
@@ -216,16 +217,15 @@ impl<T, E> TryStreamEmitter<T, E> {
     fn internal_emit(&self, res: Result<T, E>) -> CollectFuture {
         let mut inner = self.inner.lock().expect("Mutex was poisoned");
         let inner = &mut *inner;
-        if inner.value.is_some() {
-            panic!(
-                "TreStreamEmitter::emit/emit_err() was called without `.await`'ing result of previous collect"
-            )
-        }
+        assert!(
+            inner.value.is_none(),
+            "TryStreamEmitter::emit/emit_err() was called without `.await`'ing result of previous collect"
+        );
         inner.value = Some(res);
         inner
             .waker
             .take()
-            .expect("TreStreamEmitter::emit/emit_err() should only be called in context of Future::poll()")
+            .expect("TryStreamEmitter::emit/emit_err() should only be called in context of Future::poll()")
             .wake();
         CollectFuture { polled: false }
     }
@@ -318,7 +318,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(
+        expected = "StreamEmitter::emit() was called without `.await`'ing result of previous emit"
+    )]
     fn infallible_panics_on_multiple_collects() {
         futures_executor::block_on(async {
             #[allow(unused_must_use)]
@@ -389,6 +391,7 @@ mod tests {
                 self.f2().await
             }
 
+            #[allow(clippy::unused_async)]
             async fn f2(&self) -> impl Stream<Item = &str> {
                 fn_stream(|collector| async move {
                     collector.emit(self.a.as_str()).await;
@@ -405,6 +408,6 @@ mod tests {
             let s = l.f1().await;
             let z: Vec<&str> = s.collect().await;
             assert_eq!(z, ["qwe", "qwe", "qwe"]);
-        })
+        });
     }
 }
