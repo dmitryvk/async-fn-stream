@@ -196,7 +196,7 @@ impl<T> StreamEmitter<T> {
     /// * `emit` is called twice without awaiting result of first call
     /// * `emit` is called not in context of polling the stream
     #[must_use = "Ensure that emit() is awaited"]
-    pub fn emit(&self, value: T) -> CollectFuture {
+    pub fn emit(&self, value: T) -> CollectFuture<T> {
         CollectFuture::new(&self.inner, value)
     }
 }
@@ -209,7 +209,7 @@ impl<T, E> TryStreamEmitter<T, E> {
     /// * `emit`/`emit_err` is called twice without awaiting result of the first call
     /// * `emit` is called not in context of polling the stream
     #[must_use = "Ensure that emit() is awaited"]
-    pub fn emit(&self, value: T) -> CollectFuture {
+    pub fn emit(&self, value: T) -> CollectFuture<Result<T, E>> {
         CollectFuture::new(&self.inner, Ok(value))
     }
 
@@ -220,42 +220,53 @@ impl<T, E> TryStreamEmitter<T, E> {
     /// * `emit`/`emit_err` is called twice without awaiting result of the first call
     /// * `emit_err` is called not in context of polling the stream
     #[must_use = "Ensure that emit_err() is awaited"]
-    pub fn emit_err(&self, err: E) -> CollectFuture {
+    pub fn emit_err(&self, err: E) -> CollectFuture<Result<T, E>> {
         CollectFuture::new(&self.inner, Err(err))
     }
 }
 
-/// Future returned from [`StreamEmitter::emit`].
-pub struct CollectFuture {
-    polled: bool,
+pin_project! {
+    /// Future returned from [`StreamEmitter::emit`].
+    pub struct CollectFuture<'a, T> {
+        inner: &'a Mutex<Inner<T>>,
+        value: Option<T>,
+        polled: bool,
+    }
 }
 
-impl CollectFuture {
-    fn new<T>(inner: &Mutex<Inner<T>>, value: T) -> Self {
-        let mut inner = inner.lock().expect("Mutex was poisoned");
+impl<'a, T> CollectFuture<'a, T> {
+    fn new(inner: &'a Mutex<Inner<T>>, value: T) -> Self {
+        Self {
+            inner,
+            value: Some(value),
+            polled: false,
+        }
+    }
+}
+
+impl<T> Future for CollectFuture<'_, T> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        let mut inner = this.inner.lock().expect("Mutex was poisoned");
         let inner = &mut *inner;
         assert!(
             inner.value.is_none(),
             "emit() was called without `.await`'ing result of previous emit"
         );
-        inner.value = Some(value);
-        inner
-            .waker
-            .take()
-            .expect("emit() should only be called in context of Future::poll()")
-            .wake();
-        Self { polled: false }
-    }
-}
-
-impl Future for CollectFuture {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        if self.polled {
+        if let Some(value) = this.value.take() {
+            inner.value = Some(value);
+            inner
+                .waker
+                .take()
+                .expect("emit() should only be called in context of Future::poll()")
+                .wake();
+        }
+        if *this.polled {
             Poll::Ready(())
         } else {
-            self.get_mut().polled = true;
+            *this.polled = true;
             Poll::Pending
         }
     }
@@ -308,22 +319,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "emit() was called without `.await`'ing result of previous emit")]
-    fn infallible_panics_on_multiple_collects() {
+    fn infallible_unawaited_collects_are_ignored() {
         futures_executor::block_on(async {
             #[expect(
                 unused_must_use,
                 reason = "this code intentionally does not await collector.emit()"
             )]
             let stream = fn_stream(|collector| async move {
-                eprintln!("stream 1");
-                collector.emit(1);
-                collector.emit(2);
-                eprintln!("stream 3");
+                collector.emit(1)/* .await */;
+                collector.emit(2)/* .await */;
+                collector.emit(3).await;
             });
             pin_mut!(stream);
-            assert_eq!(Some(1), stream.next().await);
-            assert_eq!(Some(2), stream.next().await);
+            assert_eq!(Some(3), stream.next().await);
             assert_eq!(None, stream.next().await);
         });
     }
