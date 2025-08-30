@@ -91,6 +91,6 @@ fn read_numbers(file_name: String) -> impl Stream<Item = Result<i32, anyhow::Err
 
 [async-stream](https://github.com/tokio-rs/async-stream) is great!
 It has a nice syntax, but it is based on macros which brings some flaws:
-* proc-macros sometimes interacts badly with IDEs such as rust-analyzer or IntelliJ Rust.
+* proc-macros sometimes interacts badly with IDEs such as `rust-analyzer` or `RustRover`.
   see e.g. <https://github.com/rust-lang/rust-analyzer/issues/11533>
 * proc-macros may increase build times

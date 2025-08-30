@@ -16,7 +16,7 @@ async fn example() {
     pin_mut!(stream);
     let mut numbers = Vec::new();
     while let Some(number) = stream.next().await {
-        print!("{} ", number);
+        print!("{number} ");
         numbers.push(number);
     }
     println!();

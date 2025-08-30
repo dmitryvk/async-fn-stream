@@ -8,7 +8,8 @@ homepage = "https://github.com/dmitryvk/async-fn-stream"
 repository = "https://github.com/dmitryvk/async-fn-stream"
 keywords = ["async", "stream"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lints.clippy]
+pedantic = "deny"
 
 [dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
