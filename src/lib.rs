@@ -275,7 +275,7 @@ impl Future for CollectFuture {
 mod tests {
     use std::io::ErrorKind;
 
-    use futures_util::{pin_mut, StreamExt};
+    use futures_util::{pin_mut, stream::FuturesUnordered, StreamExt};
 
     use super::*;
 
@@ -323,7 +323,10 @@ mod tests {
     )]
     fn infallible_panics_on_multiple_collects() {
         futures_executor::block_on(async {
-            #[allow(unused_must_use)]
+            #[expect(
+                unused_must_use,
+                reason = "this code intentionally does not await collector.emit()"
+            )]
             let stream = fn_stream(|collector| async move {
                 eprintln!("stream 1");
                 collector.emit(1);
@@ -408,6 +411,86 @@ mod tests {
             let s = l.f1().await;
             let z: Vec<&str> = s.collect().await;
             assert_eq!(z, ["qwe", "qwe", "qwe"]);
+        });
+    }
+
+    #[test]
+    fn tokio_join_one_works() {
+        futures_executor::block_on(async {
+            let stream = fn_stream(|collector| async move {
+                tokio::join!(async { collector.emit(1).await },);
+                collector.emit(2).await;
+            });
+            pin_mut!(stream);
+            assert_eq!(Some(1), stream.next().await);
+            assert_eq!(Some(2), stream.next().await);
+            assert_eq!(None, stream.next().await);
+        });
+    }
+
+    #[test]
+    fn tokio_join_many_works() {
+        futures_executor::block_on(async {
+            let stream = fn_stream(|collector| async move {
+                eprintln!("try stream 1");
+                tokio::join!(
+                    async { collector.emit(1).await },
+                    async { collector.emit(2).await },
+                    async { collector.emit(3).await },
+                );
+                collector.emit(4).await;
+            });
+            pin_mut!(stream);
+            for _ in 0..3 {
+                let item = stream.next().await;
+                assert!(matches!(item, Some(1..=3)));
+            }
+            assert_eq!(Some(4), stream.next().await);
+            assert_eq!(None, stream.next().await);
+        });
+    }
+
+    #[test]
+    #[ignore = "this test hangs"]
+    fn tokio_futures_unordered_one_works() {
+        futures_executor::block_on(async {
+            let stream = fn_stream(|collector| async move {
+                let mut futs: FuturesUnordered<_> = (1..=1)
+                    .map(|i| {
+                        let collector = &collector;
+                        async move { collector.emit(i).await }
+                    })
+                    .collect();
+                while futs.next().await.is_some() {}
+                collector.emit(2).await;
+            });
+            pin_mut!(stream);
+            assert_eq!(Some(1), stream.next().await);
+            assert_eq!(Some(2), stream.next().await);
+            assert_eq!(None, stream.next().await);
+        });
+    }
+
+    #[test]
+    fn tokio_futures_unordered_many_works() {
+        futures_executor::block_on(async {
+            let stream = fn_stream(|collector| async move {
+                let mut futs: FuturesUnordered<_> = (1..=3)
+                    .map(|i| {
+                        let collector = &collector;
+                        async move { collector.emit(i).await }
+                    })
+                    .collect();
+                while futs.next().await.is_some() {}
+                collector.emit(4).await;
+            });
+            pin_mut!(stream);
+            for _ in 1..=3 {
+                let item = stream.next().await;
+                assert!(matches!(item, Some(1..=3)));
+            }
+            assert_eq!(Some(4), stream.next().await);
+            assert_eq!(None, stream.next().await);
         });
     }
 }
