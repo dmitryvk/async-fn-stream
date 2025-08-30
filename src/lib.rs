@@ -197,39 +197,11 @@ impl<T> StreamEmitter<T> {
     /// * `emit` is called not in context of polling the stream
     #[must_use = "Ensure that emit() is awaited"]
     pub fn emit(&self, value: T) -> CollectFuture {
-        let mut inner = self.inner.lock().expect("Mutex was poisoned");
-        let inner = &mut *inner;
-        assert!(
-            inner.value.is_none(),
-            "StreamEmitter::emit() was called without `.await`'ing result of previous emit"
-        );
-        inner.value = Some(value);
-        inner
-            .waker
-            .take()
-            .expect("StreamEmitter::emit() should only be called in context of Future::poll()")
-            .wake();
-        CollectFuture { polled: false }
+        CollectFuture::new(&self.inner, value)
     }
 }
 
 impl<T, E> TryStreamEmitter<T, E> {
-    fn internal_emit(&self, res: Result<T, E>) -> CollectFuture {
-        let mut inner = self.inner.lock().expect("Mutex was poisoned");
-        let inner = &mut *inner;
-        assert!(
-            inner.value.is_none(),
-            "TryStreamEmitter::emit/emit_err() was called without `.await`'ing result of previous collect"
-        );
-        inner.value = Some(res);
-        inner
-            .waker
-            .take()
-            .expect("TryStreamEmitter::emit/emit_err() should only be called in context of Future::poll()")
-            .wake();
-        CollectFuture { polled: false }
-    }
-
     /// Emit value from a stream and wait until stream consumer calls [`futures_util::StreamExt::next`] again.
     ///
     /// # Panics
@@ -238,7 +210,7 @@ impl<T, E> TryStreamEmitter<T, E> {
     /// * `emit` is called not in context of polling the stream
     #[must_use = "Ensure that emit() is awaited"]
     pub fn emit(&self, value: T) -> CollectFuture {
-        self.internal_emit(Ok(value))
+        CollectFuture::new(&self.inner, Ok(value))
     }
 
     /// Emit error from a stream and wait until stream consumer calls [`futures_util::StreamExt::next`] again.
@@ -249,13 +221,31 @@ impl<T, E> TryStreamEmitter<T, E> {
     /// * `emit_err` is called not in context of polling the stream
     #[must_use = "Ensure that emit_err() is awaited"]
     pub fn emit_err(&self, err: E) -> CollectFuture {
-        self.internal_emit(Err(err))
+        CollectFuture::new(&self.inner, Err(err))
     }
 }
 
 /// Future returned from [`StreamEmitter::emit`].
 pub struct CollectFuture {
     polled: bool,
+}
+
+impl CollectFuture {
+    fn new<T>(inner: &Mutex<Inner<T>>, value: T) -> Self {
+        let mut inner = inner.lock().expect("Mutex was poisoned");
+        let inner = &mut *inner;
+        assert!(
+            inner.value.is_none(),
+            "emit() was called without `.await`'ing result of previous emit"
+        );
+        inner.value = Some(value);
+        inner
+            .waker
+            .take()
+            .expect("emit() should only be called in context of Future::poll()")
+            .wake();
+        Self { polled: false }
+    }
 }
 
 impl Future for CollectFuture {
@@ -318,9 +308,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "StreamEmitter::emit() was called without `.await`'ing result of previous emit"
-    )]
+    #[should_panic(expected = "emit() was called without `.await`'ing result of previous emit")]
     fn infallible_panics_on_multiple_collects() {
         futures_executor::block_on(async {
             #[expect(
