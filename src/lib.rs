@@ -232,7 +232,6 @@ pin_project! {
     pub struct CollectFuture<'a, T> {
         inner: &'a Mutex<Inner<T>>,
         value: Option<T>,
-        polled: bool,
     }
 }
 
@@ -241,7 +240,6 @@ impl<'a, T> CollectFuture<'a, T> {
         Self {
             inner,
             value: Some(value),
-            polled: false,
         }
     }
 }
@@ -251,26 +249,33 @@ impl<T> Future for CollectFuture<'_, T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        let mut inner = this.inner.lock().expect("Mutex was poisoned");
-        let inner = &mut *inner;
-        assert!(
-            inner.value.is_none(),
-            "emit() was called without `.await`'ing result of previous emit"
-        );
-        if let Some(value) = this.value.take() {
+        if this.value.is_some() {
+            let mut inner_guard = this.inner.lock().expect("Mutex was poisoned");
+            let inner = &mut *inner_guard;
+            if inner.value.is_some() {
+                // If the stream already has a pending value (which is only possible
+                // if we're using internal concurrency such as `FuturedUnordered` or `join`),
+                // we can't emit another value.
+                // The value will eventually be cleared by `Stream::poll_next`.
+                // We just wait for it by rescheduling the current task.
+                // TODO: this might result in some spurious wakeups in case of `FuturesUnordered`.
+                drop(inner_guard);
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            let value = this.value.take().expect("due to `this.value.is_some()`");
             inner.value = Some(value);
             inner
                 .waker
                 .as_ref()
                 .expect("emit() should only be called in context of Future::poll()")
                 .wake_by_ref();
-        }
-        if *this.polled {
-            Poll::Ready(())
-        } else {
-            *this.polled = true;
+            drop(inner_guard);
+
             cx.waker().wake_by_ref();
             Poll::Pending
+        } else {
+            Poll::Ready(())
         }
     }
 }
