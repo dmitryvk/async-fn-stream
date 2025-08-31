@@ -83,6 +83,7 @@ impl<T, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
 
         this.inner.lock().expect("Mutex was poisoned").waker = Some(cx.waker().clone());
         let r = this.fut.poll_unpin(cx);
+        this.inner.lock().expect("Mutex was poisoned").waker = None;
         match r {
             std::task::Poll::Ready(()) => Poll::Ready(None),
             std::task::Poll::Pending => {
@@ -171,6 +172,7 @@ impl<T, E, Fut: Future<Output = Result<(), E>>> Stream for TryFnStream<T, E, Fut
         let mut this = self.project();
         this.inner.lock().expect("Mutex was poisoned").waker = Some(cx.waker().clone());
         let r = this.fut.poll_unpin(cx);
+        this.inner.lock().expect("Mutex was poisoned").waker = None;
         match r {
             std::task::Poll::Ready(Ok(())) => Poll::Ready(None),
             std::task::Poll::Ready(Err(e)) => {
@@ -259,9 +261,9 @@ impl<T> Future for CollectFuture<'_, T> {
             inner.value = Some(value);
             inner
                 .waker
-                .take()
+                .as_ref()
                 .expect("emit() should only be called in context of Future::poll()")
-                .wake();
+                .wake_by_ref();
         }
         if *this.polled {
             Poll::Ready(())
