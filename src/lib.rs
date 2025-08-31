@@ -247,7 +247,7 @@ impl<'a, T> CollectFuture<'a, T> {
 impl<T> Future for CollectFuture<'_, T> {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
         let mut inner = this.inner.lock().expect("Mutex was poisoned");
         let inner = &mut *inner;
@@ -267,6 +267,7 @@ impl<T> Future for CollectFuture<'_, T> {
             Poll::Ready(())
         } else {
             *this.polled = true;
+            cx.waker().wake_by_ref();
             Poll::Pending
         }
     }
@@ -447,7 +448,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "this test hangs"]
     fn tokio_futures_unordered_one_works() {
         futures_executor::block_on(async {
             let stream = fn_stream(|collector| async move {
