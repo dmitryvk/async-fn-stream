@@ -198,7 +198,7 @@ impl<T> StreamEmitter<T> {
     /// * `emit` is called twice without awaiting result of first call
     /// * `emit` is called not in context of polling the stream
     #[must_use = "Ensure that emit() is awaited"]
-    pub fn emit(&self, value: T) -> CollectFuture<T> {
+    pub fn emit(&'_ self, value: T) -> CollectFuture<'_, T> {
         CollectFuture::new(&self.inner, value)
     }
 }
@@ -211,7 +211,7 @@ impl<T, E> TryStreamEmitter<T, E> {
     /// * `emit`/`emit_err` is called twice without awaiting result of the first call
     /// * `emit` is called not in context of polling the stream
     #[must_use = "Ensure that emit() is awaited"]
-    pub fn emit(&self, value: T) -> CollectFuture<Result<T, E>> {
+    pub fn emit(&'_ self, value: T) -> CollectFuture<'_, Result<T, E>> {
         CollectFuture::new(&self.inner, Ok(value))
     }
 
@@ -222,7 +222,7 @@ impl<T, E> TryStreamEmitter<T, E> {
     /// * `emit`/`emit_err` is called twice without awaiting result of the first call
     /// * `emit_err` is called not in context of polling the stream
     #[must_use = "Ensure that emit_err() is awaited"]
-    pub fn emit_err(&self, err: E) -> CollectFuture<Result<T, E>> {
+    pub fn emit_err(&'_ self, err: E) -> CollectFuture<'_, Result<T, E>> {
         CollectFuture::new(&self.inner, Err(err))
     }
 }
