@@ -2,12 +2,13 @@
 
 use std::{
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex},
     task::{Poll, Waker},
 };
 
-use futures_util::{Future, FutureExt, Stream};
+use futures_util::{Future, Stream};
 use pin_project_lite::pin_project;
+use smallvec::SmallVec;
 
 /// An intermediary that transfers values from stream to its consumer
 pub struct StreamEmitter<T> {
@@ -20,8 +21,12 @@ pub struct TryStreamEmitter<T, E> {
 }
 
 struct Inner<T> {
-    value: Option<T>,
-    waker: Option<Waker>,
+    // polling is `true` only for duration of a single `FnStream::poll()` call, which helps detecting invalid usage (cross-thread or cross-task)
+    polling: AtomicBool,
+    // Due to internal concurrency, a single call to stream's future may yield multiple elements.
+    // All elements are stored here and yielded from the stream before polling the future again.
+    pending_values: SmallVec<[T; 1]>,
+    pending_wakers: SmallVec<[Waker; 1]>,
 }
 
 pin_project! {
@@ -61,8 +66,9 @@ pub fn fn_stream<T, Fut: Future<Output = ()>>(
 impl<T, Fut: Future<Output = ()>> FnStream<T, Fut> {
     fn new<F: FnOnce(StreamEmitter<T>) -> Fut>(func: F) -> Self {
         let inner = Arc::new(Mutex::new(Inner {
-            value: None,
-            waker: None,
+            polling: AtomicBool::new(false),
+            pending_values: SmallVec::new(),
+            pending_wakers: SmallVec::new(),
         }));
         let emitter = StreamEmitter {
             inner: inner.clone(),
@@ -79,18 +85,40 @@ impl<T, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        let mut this = self.project();
+        let this = self.project();
 
-        this.inner.lock().expect("Mutex was poisoned").waker = Some(cx.waker().clone());
-        let r = this.fut.poll_unpin(cx);
-        this.inner.lock().expect("Mutex was poisoned").waker = None;
+        let mut inner_guard = this.inner.lock().expect("mutex was poisoned");
+        if let Some(value) = inner_guard.pending_values.pop() {
+            return Poll::Ready(Some(value));
+        }
+        if !inner_guard.pending_wakers.is_empty() {
+            for waker in inner_guard.pending_wakers.drain(..) {
+                if !waker.will_wake(cx.waker()) {
+                    waker.wake();
+                }
+            }
+        }
+
+        let old_polling = inner_guard
+            .polling
+            .swap(true, std::sync::atomic::Ordering::Relaxed);
+        drop(inner_guard);
+        assert!(
+            !old_polling,
+            "async-fn-stream invariant violation: polling must be false before entering poll"
+        );
+        let r = this.fut.poll(cx);
+        let mut inner_guard = this.inner.lock().expect("mutex was poisoned");
+        inner_guard
+            .polling
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         match r {
             std::task::Poll::Ready(()) => Poll::Ready(None),
             std::task::Poll::Pending => {
-                let value = this.inner.lock().expect("Mutex was poisoned").value.take();
-                match value {
-                    None => Poll::Pending,
-                    Some(value) => Poll::Ready(Some(value)),
+                if let Some(value) = inner_guard.pending_values.pop() {
+                    Poll::Ready(Some(value))
+                } else {
+                    Poll::Pending
                 }
             }
         }
@@ -144,8 +172,9 @@ pin_project! {
 impl<T, E, Fut: Future<Output = Result<(), E>>> TryFnStream<T, E, Fut> {
     fn new<F: FnOnce(TryStreamEmitter<T, E>) -> Fut>(func: F) -> Self {
         let inner = Arc::new(Mutex::new(Inner {
-            value: None,
-            waker: None,
+            polling: AtomicBool::new(false),
+            pending_values: SmallVec::new(),
+            pending_wakers: SmallVec::new(),
         }));
         let emitter = TryStreamEmitter {
             inner: inner.clone(),
@@ -166,13 +195,36 @@ impl<T, E, Fut: Future<Output = Result<(), E>>> Stream for TryFnStream<T, E, Fut
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        // TODO: merge the implementation with `FnStream`
         if self.is_err {
             return Poll::Ready(None);
         }
-        let mut this = self.project();
-        this.inner.lock().expect("Mutex was poisoned").waker = Some(cx.waker().clone());
-        let r = this.fut.poll_unpin(cx);
-        this.inner.lock().expect("Mutex was poisoned").waker = None;
+        let this = self.project();
+        let mut inner_guard = this.inner.lock().expect("mutex was poisoned");
+        if let Some(value) = inner_guard.pending_values.pop() {
+            return Poll::Ready(Some(value));
+        }
+        if !inner_guard.pending_wakers.is_empty() {
+            for waker in inner_guard.pending_wakers.drain(..) {
+                if !waker.will_wake(cx.waker()) {
+                    waker.wake();
+                }
+            }
+        }
+
+        let old_polling = inner_guard
+            .polling
+            .swap(true, std::sync::atomic::Ordering::Relaxed);
+        drop(inner_guard);
+        assert!(
+            !old_polling,
+            "async-fn-stream invariant violation: polling must be false before entering poll"
+        );
+        let r = this.fut.poll(cx);
+        let mut inner_guard = this.inner.lock().expect("mutex was poisoned");
+        inner_guard
+            .polling
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         match r {
             std::task::Poll::Ready(Ok(())) => Poll::Ready(None),
             std::task::Poll::Ready(Err(e)) => {
@@ -180,10 +232,10 @@ impl<T, E, Fut: Future<Output = Result<(), E>>> Stream for TryFnStream<T, E, Fut
                 Poll::Ready(Some(Err(e)))
             }
             std::task::Poll::Pending => {
-                let value = this.inner.lock().expect("Mutex was poisoned").value.take();
-                match value {
-                    None => Poll::Pending,
-                    Some(value) => Poll::Ready(Some(value)),
+                if let Some(value) = inner_guard.pending_values.pop() {
+                    Poll::Ready(Some(value))
+                } else {
+                    Poll::Pending
                 }
             }
         }
@@ -249,34 +301,24 @@ impl<T> Future for CollectFuture<'_, T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        if this.value.is_some() {
-            let mut inner_guard = this.inner.lock().expect("Mutex was poisoned");
-            let inner = &mut *inner_guard;
-            if inner.value.is_some() {
-                // If the stream already has a pending value (which is only possible
-                // if we're using internal concurrency such as `FuturedUnordered` or `join`),
-                // we can't emit another value.
-                // The value will eventually be cleared by `Stream::poll_next`.
-                // We just wait for it by rescheduling the current task.
-                // TODO: this might result in some spurious wakeups in case of `FuturesUnordered`.
-                drop(inner_guard);
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-            let value = this.value.take().expect("due to `this.value.is_some()`");
-            inner.value = Some(value);
-            // inner.waker is `Some` only for duration of a single `FnStream::poll()` call, which helps detecting invalid usage
-            inner
-                .waker
-                .as_ref()
-                .expect("StreamEmitter::emit().await should only be called in context of `fn_stream()`/`try_fn_stream()`")
-                .wake_by_ref();
-            drop(inner_guard);
+        let mut inner_guard = this.inner.lock().expect("Mutex was poisoned");
+        let inner = &mut *inner_guard;
+        assert!(
+            inner.polling.load(std::sync::atomic::Ordering::Relaxed),
+            "StreamEmitter::emit().await should only be called in context of `fn_stream()`/`try_fn_stream()`"
+        );
 
-            cx.waker().wake_by_ref();
+        if let Some(value) = this.value.take() {
+            inner.pending_values.push(value);
+            inner.pending_wakers.push(cx.waker().clone());
             Poll::Pending
-        } else {
+        } else if inner.pending_values.is_empty() {
+            // stream only polls the future after draining `inner.pending_values`, so this check should not be necessary in theory;
+            // this is just a safeguard against misuses; e.g. if a future calls `.emit().poll()` in a loop without yielding on `Poll::Pending`,
+            // this would lead to overflow of `inner.pending_values`
             Poll::Ready(())
+        } else {
+            Poll::Pending
         }
     }
 }
