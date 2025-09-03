@@ -4,7 +4,7 @@ use futures_util::{pin_mut, Stream, StreamExt};
 fn build_stream() -> impl Stream<Item = i32> {
     fn_stream(|emitter| async move {
         for i in 0..3 {
-            // yield elements from stream via `collector`
+            // yield elements from stream via `emitter`
             emitter.emit(i).await;
         }
     })

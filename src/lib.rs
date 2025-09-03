@@ -250,8 +250,8 @@ impl<T> StreamEmitter<T> {
     /// * `emit` is called twice without awaiting result of first call
     /// * `emit` is called not in context of polling the stream
     #[must_use = "Ensure that emit() is awaited"]
-    pub fn emit(&'_ self, value: T) -> CollectFuture<'_, T> {
-        CollectFuture::new(&self.inner, value)
+    pub fn emit(&'_ self, value: T) -> EmitFuture<'_, T> {
+        EmitFuture::new(&self.inner, value)
     }
 }
 
@@ -263,8 +263,8 @@ impl<T, E> TryStreamEmitter<T, E> {
     /// * `emit`/`emit_err` is called twice without awaiting result of the first call
     /// * `emit` is called not in context of polling the stream
     #[must_use = "Ensure that emit() is awaited"]
-    pub fn emit(&'_ self, value: T) -> CollectFuture<'_, Result<T, E>> {
-        CollectFuture::new(&self.inner, Ok(value))
+    pub fn emit(&'_ self, value: T) -> EmitFuture<'_, Result<T, E>> {
+        EmitFuture::new(&self.inner, Ok(value))
     }
 
     /// Emit error from a stream and wait until stream consumer calls [`futures_util::StreamExt::next`] again.
@@ -274,20 +274,20 @@ impl<T, E> TryStreamEmitter<T, E> {
     /// * `emit`/`emit_err` is called twice without awaiting result of the first call
     /// * `emit_err` is called not in context of polling the stream
     #[must_use = "Ensure that emit_err() is awaited"]
-    pub fn emit_err(&'_ self, err: E) -> CollectFuture<'_, Result<T, E>> {
-        CollectFuture::new(&self.inner, Err(err))
+    pub fn emit_err(&'_ self, err: E) -> EmitFuture<'_, Result<T, E>> {
+        EmitFuture::new(&self.inner, Err(err))
     }
 }
 
 pin_project! {
     /// Future returned from [`StreamEmitter::emit`].
-    pub struct CollectFuture<'a, T> {
+    pub struct EmitFuture<'a, T> {
         inner: &'a Mutex<Inner<T>>,
         value: Option<T>,
     }
 }
 
-impl<'a, T> CollectFuture<'a, T> {
+impl<'a, T> EmitFuture<'a, T> {
     fn new(inner: &'a Mutex<Inner<T>>, value: T) -> Self {
         Self {
             inner,
@@ -296,7 +296,7 @@ impl<'a, T> CollectFuture<'a, T> {
     }
 }
 
-impl<T> Future for CollectFuture<'_, T> {
+impl<T> Future for EmitFuture<'_, T> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
@@ -334,11 +334,11 @@ mod tests {
     #[test]
     fn infallible_works() {
         futures_executor::block_on(async {
-            let stream = fn_stream(|collector| async move {
+            let stream = fn_stream(|emitter| async move {
                 eprintln!("stream 1");
-                collector.emit(1).await;
+                emitter.emit(1).await;
                 eprintln!("stream 2");
-                collector.emit(2).await;
+                emitter.emit(2).await;
                 eprintln!("stream 3");
             });
             pin_mut!(stream);
@@ -355,11 +355,11 @@ mod tests {
             let b = 2;
             let a = &a;
             let b = &b;
-            let stream = fn_stream(|collector| async move {
+            let stream = fn_stream(|emitter| async move {
                 eprintln!("stream 1");
-                collector.emit(a).await;
+                emitter.emit(a).await;
                 eprintln!("stream 2");
-                collector.emit(b).await;
+                emitter.emit(b).await;
                 eprintln!("stream 3");
             });
             pin_mut!(stream);
@@ -370,16 +370,16 @@ mod tests {
     }
 
     #[test]
-    fn infallible_unawaited_collects_are_ignored() {
+    fn infallible_unawaited_emit_is_ignored() {
         futures_executor::block_on(async {
             #[expect(
                 unused_must_use,
-                reason = "this code intentionally does not await collector.emit()"
+                reason = "this code intentionally does not await emitter.emit()"
             )]
-            let stream = fn_stream(|collector| async move {
-                collector.emit(1)/* .await */;
-                collector.emit(2)/* .await */;
-                collector.emit(3).await;
+            let stream = fn_stream(|emitter| async move {
+                emitter.emit(1)/* .await */;
+                emitter.emit(2)/* .await */;
+                emitter.emit(3).await;
             });
             pin_mut!(stream);
             assert_eq!(Some(3), stream.next().await);
@@ -390,11 +390,11 @@ mod tests {
     #[test]
     fn fallible_works() {
         futures_executor::block_on(async {
-            let stream = try_fn_stream(|collector| async move {
+            let stream = try_fn_stream(|emitter| async move {
                 eprintln!("try stream 1");
-                collector.emit(1).await;
+                emitter.emit(1).await;
                 eprintln!("try stream 2");
-                collector.emit(2).await;
+                emitter.emit(2).await;
                 eprintln!("try stream 3");
                 Err(std::io::Error::from(ErrorKind::Other))
             });
@@ -409,13 +409,13 @@ mod tests {
     #[test]
     fn fallible_emit_err_works() {
         futures_executor::block_on(async {
-            let stream = try_fn_stream(|collector| async move {
+            let stream = try_fn_stream(|emitter| async move {
                 eprintln!("try stream 1");
-                collector.emit(1).await;
+                emitter.emit(1).await;
                 eprintln!("try stream 2");
-                collector.emit(2).await;
+                emitter.emit(2).await;
                 eprintln!("try stream 3");
-                collector
+                emitter
                     .emit_err(std::io::Error::from(ErrorKind::Other))
                     .await;
                 eprintln!("try stream 4");
@@ -443,10 +443,10 @@ mod tests {
 
             #[allow(clippy::unused_async)]
             async fn f2(&self) -> impl Stream<Item = &str> {
-                fn_stream(|collector| async move {
-                    collector.emit(self.a.as_str()).await;
-                    collector.emit(self.a.as_str()).await;
-                    collector.emit(self.a.as_str()).await;
+                fn_stream(|emitter| async move {
+                    emitter.emit(self.a.as_str()).await;
+                    emitter.emit(self.a.as_str()).await;
+                    emitter.emit(self.a.as_str()).await;
                 })
             }
         }
@@ -464,9 +464,9 @@ mod tests {
     #[test]
     fn tokio_join_one_works() {
         futures_executor::block_on(async {
-            let stream = fn_stream(|collector| async move {
-                tokio::join!(async { collector.emit(1).await },);
-                collector.emit(2).await;
+            let stream = fn_stream(|emitter| async move {
+                tokio::join!(async { emitter.emit(1).await },);
+                emitter.emit(2).await;
             });
             pin_mut!(stream);
             assert_eq!(Some(1), stream.next().await);
@@ -478,14 +478,14 @@ mod tests {
     #[test]
     fn tokio_join_many_works() {
         futures_executor::block_on(async {
-            let stream = fn_stream(|collector| async move {
+            let stream = fn_stream(|emitter| async move {
                 eprintln!("try stream 1");
                 tokio::join!(
-                    async { collector.emit(1).await },
-                    async { collector.emit(2).await },
-                    async { collector.emit(3).await },
+                    async { emitter.emit(1).await },
+                    async { emitter.emit(2).await },
+                    async { emitter.emit(3).await },
                 );
-                collector.emit(4).await;
+                emitter.emit(4).await;
             });
             pin_mut!(stream);
             for _ in 0..3 {
@@ -500,15 +500,15 @@ mod tests {
     #[test]
     fn tokio_futures_unordered_one_works() {
         futures_executor::block_on(async {
-            let stream = fn_stream(|collector| async move {
+            let stream = fn_stream(|emitter| async move {
                 let mut futs: FuturesUnordered<_> = (1..=1)
                     .map(|i| {
-                        let collector = &collector;
-                        async move { collector.emit(i).await }
+                        let emitter = &emitter;
+                        async move { emitter.emit(i).await }
                     })
                     .collect();
                 while futs.next().await.is_some() {}
-                collector.emit(2).await;
+                emitter.emit(2).await;
             });
             pin_mut!(stream);
             assert_eq!(Some(1), stream.next().await);
@@ -520,15 +520,15 @@ mod tests {
     #[test]
     fn tokio_futures_unordered_many_works() {
         futures_executor::block_on(async {
-            let stream = fn_stream(|collector| async move {
+            let stream = fn_stream(|emitter| async move {
                 let mut futs: FuturesUnordered<_> = (1..=3)
                     .map(|i| {
-                        let collector = &collector;
-                        async move { collector.emit(i).await }
+                        let emitter = &emitter;
+                        async move { emitter.emit(i).await }
                     })
                     .collect();
                 while futs.next().await.is_some() {}
-                collector.emit(4).await;
+                emitter.emit(4).await;
             });
             pin_mut!(stream);
             for _ in 1..=3 {

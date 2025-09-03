@@ -6,13 +6,13 @@ fn build_stream() -> impl Stream<Item = i32> {
         tokio::join!(
             async {
                 for i in 0..3 {
-                    // yield elements from stream via `collector`
+                    // yield elements from stream via `emitter`
                     emitter.emit(i).await;
                 }
             },
             async {
                 for i in 10..13 {
-                    // yield elements from stream via `collector`
+                    // yield elements from stream via `emitter`
                     emitter.emit(i).await;
                 }
             }
