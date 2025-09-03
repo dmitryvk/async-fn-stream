@@ -25,6 +25,16 @@ To create a stream:
    This will end the stream.
 2. An `emitter` also has an `emit_err()` method to return errors without ending the stream.
 
+## Limitations
+
+`fn_stream` does not support cross-task streams, that is all stream values must be produced in the same task as the stream.
+Specifically, it is not supported to move `StreamEmitter` to another thread or tokio task.
+If your use case necessitates this, consider using async chanells for that.
+
+## Advanced usage
+
+Internal concurrency is supported within `fn_stream` (see [examples/join.rs](examples/join.rs)).
+
 # Examples
 
 Finite stream of numbers

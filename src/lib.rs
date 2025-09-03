@@ -265,10 +265,11 @@ impl<T> Future for CollectFuture<'_, T> {
             }
             let value = this.value.take().expect("due to `this.value.is_some()`");
             inner.value = Some(value);
+            // inner.waker is `Some` only for duration of a single `FnStream::poll()` call, which helps detecting invalid usage
             inner
                 .waker
                 .as_ref()
-                .expect("emit() should only be called in context of Future::poll()")
+                .expect("StreamEmitter::emit().await should only be called in context of `fn_stream()`/`try_fn_stream()`")
                 .wake_by_ref();
             drop(inner_guard);
 
