@@ -11,6 +11,13 @@ keywords = ["async", "stream"]
 [lints.clippy]
 pedantic = "deny"
 
+[[bench]]
+name = "bench"
+harness = false
+
+[profile.bench]
+debug = true
+
 [dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 pin-project-lite = "0.2"
@@ -18,5 +25,6 @@ smallvec = "1.15.1"
 
 [dev-dependencies]
 anyhow = "1"
+async-stream = "0.3.6"
 futures-executor = { version = "0.3", default-features = false, features = ["std", "thread-pool"] }
 tokio = { version = "1.0", features = ["full"] }
