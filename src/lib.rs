@@ -23,6 +23,9 @@ pub struct TryStreamEmitter<T, E> {
 struct Inner<T> {
     // polling is `true` only for duration of a single `FnStream::poll()` call, which helps detecting invalid usage (cross-thread or cross-task)
     polling: AtomicBool,
+    // `stream_waker` is used to compare the waker of the stream future with the waker of the `Emit` future.
+    // If the stream implementation does not have sub-executors, we don't have to push wakers to `pending_wakers`, which avoids cloning it.
+    stream_waker: Option<Waker>,
     // Due to internal concurrency, a single call to stream's future may yield multiple elements.
     // All elements are stored here and yielded from the stream before polling the future again.
     pending_values: SmallVec<[T; 1]>,
@@ -67,6 +70,7 @@ impl<T, Fut: Future<Output = ()>> FnStream<T, Fut> {
     fn new<F: FnOnce(StreamEmitter<T>) -> Fut>(func: F) -> Self {
         let inner = Arc::new(Mutex::new(Inner {
             polling: AtomicBool::new(false),
+            stream_waker: None,
             pending_values: SmallVec::new(),
             pending_wakers: SmallVec::new(),
         }));
@@ -97,6 +101,11 @@ impl<T, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
                     waker.wake();
                 }
             }
+        }
+        if let Some(stream_waker) = inner_guard.stream_waker.as_mut() {
+            stream_waker.clone_from(cx.waker());
+        } else {
+            inner_guard.stream_waker = Some(cx.waker().clone());
         }
 
         let old_polling = inner_guard
@@ -173,6 +182,7 @@ impl<T, E, Fut: Future<Output = Result<(), E>>> TryFnStream<T, E, Fut> {
     fn new<F: FnOnce(TryStreamEmitter<T, E>) -> Fut>(func: F) -> Self {
         let inner = Arc::new(Mutex::new(Inner {
             polling: AtomicBool::new(false),
+            stream_waker: None,
             pending_values: SmallVec::new(),
             pending_wakers: SmallVec::new(),
         }));
@@ -210,6 +220,11 @@ impl<T, E, Fut: Future<Output = Result<(), E>>> Stream for TryFnStream<T, E, Fut
                     waker.wake();
                 }
             }
+        }
+        if let Some(stream_waker) = inner_guard.stream_waker.as_mut() {
+            stream_waker.clone_from(cx.waker());
+        } else {
+            inner_guard.stream_waker = Some(cx.waker().clone());
         }
 
         let old_polling = inner_guard
@@ -310,7 +325,14 @@ impl<T> Future for EmitFuture<'_, T> {
 
         if let Some(value) = this.value.take() {
             inner.pending_values.push(value);
-            inner.pending_wakers.push(cx.waker().clone());
+            let is_same_waker = if let Some(stream_waker) = inner.stream_waker.as_ref() {
+                stream_waker.will_wake(cx.waker())
+            } else {
+                false
+            };
+            if !is_same_waker {
+                inner.pending_wakers.push(cx.waker().clone());
+            }
             Poll::Pending
         } else if inner.pending_values.is_empty() {
             // stream only polls the future after draining `inner.pending_values`, so this check should not be necessary in theory;
