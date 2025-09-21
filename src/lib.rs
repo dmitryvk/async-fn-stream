@@ -676,7 +676,6 @@ mod tests {
                 }
             }));
 
-            // TODO: this should panic
             let mut sum = 0;
             while let Some(item) = stream.next().await {
                 sum += item;
@@ -708,7 +707,6 @@ mod tests {
                 Ok::<_, ()>(())
             }));
 
-            // TODO: this should panic
             let mut sum = 0;
             while let Some(Ok(item)) = stream.next().await {
                 sum += item;
