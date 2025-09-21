@@ -33,3 +33,10 @@ jobs:
       - name: Install rust (stable)
         uses: dtolnay/rust-toolchain@stable
       - run: cargo test --all-targets --workspace
+  test-miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+      - run: cargo miri test --all-targets --workspace
