@@ -609,4 +609,60 @@ mod tests {
             assert_eq!(sum, 36);
         });
     }
+
+    #[test]
+    fn infallible_bad_nested_emit_detected() {
+        futures_executor::block_on(async {
+            let mut stream = pin!(fn_stream(|emitter| async move {
+                for i in 0..3 {
+                    let emitter_ref = &emitter;
+                    let mut stream_2 = pin!(fn_stream(|emitter_2| async move {
+                        emitter_2.emit(0).await;
+                        for j in 0..3 {
+                            emitter_ref.emit(j).await;
+                        }
+                    }));
+                    while let Some(item) = stream_2.next().await {
+                        emitter.emit(3 * i + item).await;
+                    }
+                }
+            }));
+
+            // TODO: this should panic
+            let mut sum = 0;
+            while let Some(item) = stream.next().await {
+                sum += item;
+            }
+            assert_eq!(sum, 36);
+        });
+    }
+
+    #[test]
+    fn fallible_bad_nested_emit_detected() {
+        futures_executor::block_on(async {
+            let mut stream = pin!(try_fn_stream(|emitter| async move {
+                for i in 0..3 {
+                    let emitter_ref = &emitter;
+                    let mut stream_2 = pin!(try_fn_stream(|emitter_2| async move {
+                        emitter_2.emit(0).await;
+                        for j in 0..3 {
+                            emitter_ref.emit(j).await;
+                        }
+                        Ok::<_, ()>(())
+                    }));
+                    while let Some(Ok(item)) = stream_2.next().await {
+                        emitter.emit(3 * i + item).await;
+                    }
+                }
+                Ok::<_, ()>(())
+            }));
+
+            // TODO: this should panic
+            let mut sum = 0;
+            while let Some(Ok(item)) = stream.next().await {
+                sum += item;
+            }
+            assert_eq!(sum, 36);
+        });
+    }
 }
