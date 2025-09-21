@@ -347,7 +347,7 @@ impl<T> Future for EmitFuture<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::ErrorKind;
+    use std::{io::ErrorKind, pin::pin};
 
     use futures_util::{pin_mut, stream::FuturesUnordered, StreamExt};
 
@@ -559,6 +559,54 @@ mod tests {
             }
             assert_eq!(Some(4), stream.next().await);
             assert_eq!(None, stream.next().await);
+        });
+    }
+
+    #[test]
+    fn infallible_nested_streams_work() {
+        futures_executor::block_on(async {
+            let mut stream = pin!(fn_stream(|emitter| async move {
+                for i in 0..3 {
+                    let mut stream_2 = pin!(fn_stream(|emitter| async move {
+                        for j in 0..3 {
+                            emitter.emit(j).await;
+                        }
+                    }));
+                    while let Some(item) = stream_2.next().await {
+                        emitter.emit(3 * i + item).await;
+                    }
+                }
+            }));
+            let mut sum = 0;
+            while let Some(item) = stream.next().await {
+                sum += item;
+            }
+            assert_eq!(sum, 36);
+        });
+    }
+
+    #[test]
+    fn fallible_nested_streams_work() {
+        futures_executor::block_on(async {
+            let mut stream = pin!(try_fn_stream(|emitter| async move {
+                for i in 0..3 {
+                    let mut stream_2 = pin!(try_fn_stream(|emitter| async move {
+                        for j in 0..3 {
+                            emitter.emit(j).await;
+                        }
+                        Ok::<_, ()>(())
+                    }));
+                    while let Some(Ok(item)) = stream_2.next().await {
+                        emitter.emit(3 * i + item).await;
+                    }
+                }
+                Ok::<_, ()>(())
+            }));
+            let mut sum = 0;
+            while let Some(Ok(item)) = stream.next().await {
+                sum += item;
+            }
+            assert_eq!(sum, 36);
         });
     }
 }
