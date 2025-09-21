@@ -39,5 +39,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install rust (nightly)
         uses: dtolnay/rust-toolchain@nightly
-        components: miri
+        with:
+          components: miri
       - run: cargo miri test --all-targets --workspace
