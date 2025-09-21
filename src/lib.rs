@@ -26,7 +26,7 @@ thread_local! {
     static ACTIVE_STREAM_INNER: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
 }
 
-/// A guard that ensures that the value `ACTIVE_STREAM_INNER` is returned to its previous value in case of unwinding.
+/// A guard that ensures that `ACTIVE_STREAM_INNER` is returned to its previous value even in case of a panic.
 struct ActiveStreamPointerGuard {
     old_ptr: *const (),
 }
@@ -370,7 +370,7 @@ impl<T> Future for EmitFuture<'_, T> {
         // 1) we hold a unique reference to `this.inner` since we verified that ACTIVE_STREAM_INNER == self.inner
         //    - we're calling `{Try,}FnStream::poll_next` in this thread, which holds the only other reference to the same instance of `Inner<T>`
         //    - `{Try,}FnStream::poll_next` is not holding a reference to `self.inner` during the call to `fut.poll`
-        // 2) `this.inner` is not deallocated for the durgion for `EmitFuture::poll`
+        // 2) `this.inner` is not deallocated for the duration of this method
         let inner = unsafe { &mut *this.inner.get() };
 
         if let Some(value) = this.value.take() {
