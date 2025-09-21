@@ -1,8 +1,9 @@
 #![doc = include_str!("../README.md")]
 
 use std::{
+    cell::{Cell, UnsafeCell},
     pin::Pin,
-    sync::{atomic::AtomicBool, Arc, Mutex},
+    sync::Arc,
     task::{Poll, Waker},
 };
 
@@ -12,17 +13,45 @@ use smallvec::SmallVec;
 
 /// An intermediary that transfers values from stream to its consumer
 pub struct StreamEmitter<T> {
-    inner: Arc<Mutex<Inner<T>>>,
+    inner: Arc<UnsafeCell<Inner<T>>>,
 }
 
 /// An intermediary that transfers values from stream to its consumer
 pub struct TryStreamEmitter<T, E> {
-    inner: Arc<Mutex<Inner<Result<T, E>>>>,
+    inner: Arc<UnsafeCell<Inner<Result<T, E>>>>,
 }
 
+thread_local! {
+    /// A type-erased pointer to the `Inner<_>`, for which a call to `Stream::poll_next` is active.
+    static ACTIVE_STREAM_INNER: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
+}
+
+/// A guard that ensures that `ACTIVE_STREAM_INNER` is returned to its previous value even in case of a panic.
+struct ActiveStreamPointerGuard {
+    old_ptr: *const (),
+}
+
+impl ActiveStreamPointerGuard {
+    fn set_active_ptr(ptr: *const ()) -> Self {
+        let old_ptr = ACTIVE_STREAM_INNER.with(|thread_ptr| thread_ptr.replace(ptr));
+        Self { old_ptr }
+    }
+}
+
+impl Drop for ActiveStreamPointerGuard {
+    fn drop(&mut self) {
+        ACTIVE_STREAM_INNER.with(|thread_ptr| thread_ptr.set(self.old_ptr));
+    }
+}
+
+/// SAFETY:
+/// `Inner<T>` stores the state shared between `StreamEmitter`/`TryStreamEmitter` and `FnStream`/`TryFnStream`.
+/// It is stored within `Arc<UnsafeCell<_>>`. Exclusive access to it is controlled using:
+/// 1) exclusive reference `Pin<&mut FnStream>` which is provided to `FnStream::poll_next`
+/// 2) `ACTIVE_STREAM_INNER`, which is itself managed by `FnStream::poll_next`.
+///    - `ACTIVE_STREAM_INNER` is only set when the corresponding `Pin<&mut FnStream>` is on the stack
+///    - `EmitFuture` can safely access its inner reference if it equals to `ACTIVE_STREAM_INNER` (all other accesses are invalid and lead to panics)
 struct Inner<T> {
-    // polling is `true` only for duration of a single `FnStream::poll()` call, which helps detecting invalid usage (cross-thread or cross-task)
-    polling: AtomicBool,
     // `stream_waker` is used to compare the waker of the stream future with the waker of the `Emit` future.
     // If the stream implementation does not have sub-executors, we don't have to push wakers to `pending_wakers`, which avoids cloning it.
     stream_waker: Option<Waker>,
@@ -37,7 +66,7 @@ pin_project! {
     pub struct FnStream<T, Fut: Future<Output = ()>> {
         #[pin]
         fut: Fut,
-        inner: Arc<Mutex<Inner<T>>>,
+        inner: Arc<UnsafeCell<Inner<T>>>,
     }
 }
 
@@ -68,8 +97,7 @@ pub fn fn_stream<T, Fut: Future<Output = ()>>(
 
 impl<T, Fut: Future<Output = ()>> FnStream<T, Fut> {
     fn new<F: FnOnce(StreamEmitter<T>) -> Fut>(func: F) -> Self {
-        let inner = Arc::new(Mutex::new(Inner {
-            polling: AtomicBool::new(false),
+        let inner = Arc::new(UnsafeCell::new(Inner {
             stream_waker: None,
             pending_values: SmallVec::new(),
             pending_wakers: SmallVec::new(),
@@ -91,40 +119,50 @@ impl<T, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
     ) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
-        let mut inner_guard = this.inner.lock().expect("mutex was poisoned");
-        if let Some(value) = inner_guard.pending_values.pop() {
+        // SAFETY:
+        // (see safety comment for `Inner<T>`)
+        // 1) we have no aliasing, since we're holding unique reference to `Self`, and
+        // 2) `this.inner` is not deallocated for the duration of this method
+        let inner = unsafe { &mut *this.inner.get() };
+        if let Some(value) = inner.pending_values.pop() {
             return Poll::Ready(Some(value));
         }
-        if !inner_guard.pending_wakers.is_empty() {
-            for waker in inner_guard.pending_wakers.drain(..) {
+        if !inner.pending_wakers.is_empty() {
+            for waker in inner.pending_wakers.drain(..) {
                 if !waker.will_wake(cx.waker()) {
                     waker.wake();
                 }
             }
         }
-        if let Some(stream_waker) = inner_guard.stream_waker.as_mut() {
+        if let Some(stream_waker) = inner.stream_waker.as_mut() {
             stream_waker.clone_from(cx.waker());
         } else {
-            inner_guard.stream_waker = Some(cx.waker().clone());
+            inner.stream_waker = Some(cx.waker().clone());
         }
 
-        let old_polling = inner_guard
-            .polling
-            .swap(true, std::sync::atomic::Ordering::Relaxed);
-        drop(inner_guard);
-        assert!(
-            !old_polling,
-            "async-fn-stream invariant violation: polling must be false before entering poll"
-        );
+        // SAFETY: ensure that we're not holding a reference to this.inner
+        _ = inner;
+
+        // SAFETY for Inner<T>:
+        // - `ACTIVE_STREAM_INNER` now contains valid pointer to `this.inner` during the call to `fut.poll`
+        // - `ACTIVE_STREAM_INNER` is restored after the call due to the use of guard
+        let polling_ptr_guard =
+            ActiveStreamPointerGuard::set_active_ptr(Arc::as_ptr(&*this.inner).cast());
         let r = this.fut.poll(cx);
-        let mut inner_guard = this.inner.lock().expect("mutex was poisoned");
-        inner_guard
-            .polling
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        drop(polling_ptr_guard);
+
+        // SAFETY:
+        // (see safety comment for `Inner<T>`)
+        // 1) we have no aliasing, since:
+        //    - we're holding unique reference to `Self`, and
+        //    - we removed the pointer from `ACTIVE_STREAM_INNER`
+        // 2) `this.inner` is not deallocated for the duration of this method
+        let inner = unsafe { &mut *this.inner.get() };
+
         match r {
             std::task::Poll::Ready(()) => Poll::Ready(None),
             std::task::Poll::Pending => {
-                if let Some(value) = inner_guard.pending_values.pop() {
+                if let Some(value) = inner.pending_values.pop() {
                     Poll::Ready(Some(value))
                 } else {
                     Poll::Pending
@@ -174,14 +212,13 @@ pin_project! {
         is_err: bool,
         #[pin]
         fut: Fut,
-        inner: Arc<Mutex<Inner<Result<T, E>>>>,
+        inner: Arc<UnsafeCell<Inner<Result<T, E>>>>,
     }
 }
 
 impl<T, E, Fut: Future<Output = Result<(), E>>> TryFnStream<T, E, Fut> {
     fn new<F: FnOnce(TryStreamEmitter<T, E>) -> Fut>(func: F) -> Self {
-        let inner = Arc::new(Mutex::new(Inner {
-            polling: AtomicBool::new(false),
+        let inner = Arc::new(UnsafeCell::new(Inner {
             stream_waker: None,
             pending_values: SmallVec::new(),
             pending_wakers: SmallVec::new(),
@@ -210,36 +247,45 @@ impl<T, E, Fut: Future<Output = Result<(), E>>> Stream for TryFnStream<T, E, Fut
             return Poll::Ready(None);
         }
         let this = self.project();
-        let mut inner_guard = this.inner.lock().expect("mutex was poisoned");
-        if let Some(value) = inner_guard.pending_values.pop() {
+        // SAFETY:
+        // (see safety comment for `Inner<T>`)
+        // 1) we have no aliasing, since we're holding unique reference to `Self`, and
+        // 2) `this.inner` is not deallocated for the duration of this method
+        let inner = unsafe { &mut *this.inner.get() };
+        if let Some(value) = inner.pending_values.pop() {
             return Poll::Ready(Some(value));
         }
-        if !inner_guard.pending_wakers.is_empty() {
-            for waker in inner_guard.pending_wakers.drain(..) {
+        if !inner.pending_wakers.is_empty() {
+            for waker in inner.pending_wakers.drain(..) {
                 if !waker.will_wake(cx.waker()) {
                     waker.wake();
                 }
             }
         }
-        if let Some(stream_waker) = inner_guard.stream_waker.as_mut() {
+        if let Some(stream_waker) = inner.stream_waker.as_mut() {
             stream_waker.clone_from(cx.waker());
         } else {
-            inner_guard.stream_waker = Some(cx.waker().clone());
+            inner.stream_waker = Some(cx.waker().clone());
         }
 
-        let old_polling = inner_guard
-            .polling
-            .swap(true, std::sync::atomic::Ordering::Relaxed);
-        drop(inner_guard);
-        assert!(
-            !old_polling,
-            "async-fn-stream invariant violation: polling must be false before entering poll"
-        );
+        // SAFETY: ensure that we're not holding a reference to this.inner
+        _ = inner;
+
+        // SAFETY for Inner<T>:
+        // - `ACTIVE_STREAM_INNER` now contains valid pointer to `this.inner` during the call to `fut.poll`
+        // - `ACTIVE_STREAM_INNER` is restored after the call due to the use of guard
+        let polling_ptr_guard =
+            ActiveStreamPointerGuard::set_active_ptr(Arc::as_ptr(&*this.inner).cast());
         let r = this.fut.poll(cx);
-        let mut inner_guard = this.inner.lock().expect("mutex was poisoned");
-        inner_guard
-            .polling
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        drop(polling_ptr_guard);
+
+        // SAFETY:
+        // (see safety comment for `Inner<T>`)
+        // 1) we have no aliasing, since:
+        //    - we're holding unique reference to `Self`, and
+        //    - we removed the pointer from `ACTIVE_STREAM_INNER`
+        // 2) `this.inner` is not deallocated for the duration of this method
+        let inner = unsafe { &mut *this.inner.get() };
         match r {
             std::task::Poll::Ready(Ok(())) => Poll::Ready(None),
             std::task::Poll::Ready(Err(e)) => {
@@ -247,7 +293,7 @@ impl<T, E, Fut: Future<Output = Result<(), E>>> Stream for TryFnStream<T, E, Fut
                 Poll::Ready(Some(Err(e)))
             }
             std::task::Poll::Pending => {
-                if let Some(value) = inner_guard.pending_values.pop() {
+                if let Some(value) = inner.pending_values.pop() {
                     Poll::Ready(Some(value))
                 } else {
                     Poll::Pending
@@ -297,13 +343,13 @@ impl<T, E> TryStreamEmitter<T, E> {
 pin_project! {
     /// Future returned from [`StreamEmitter::emit`].
     pub struct EmitFuture<'a, T> {
-        inner: &'a Mutex<Inner<T>>,
+        inner: &'a UnsafeCell<Inner<T>>,
         value: Option<T>,
     }
 }
 
 impl<'a, T> EmitFuture<'a, T> {
-    fn new(inner: &'a Mutex<Inner<T>>, value: T) -> Self {
+    fn new(inner: &'a UnsafeCell<Inner<T>>, value: T) -> Self {
         Self {
             inner,
             value: Some(value),
@@ -316,12 +362,16 @@ impl<T> Future for EmitFuture<'_, T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        let mut inner_guard = this.inner.lock().expect("Mutex was poisoned");
-        let inner = &mut *inner_guard;
         assert!(
-            inner.polling.load(std::sync::atomic::Ordering::Relaxed),
-            "StreamEmitter::emit().await should only be called in context of `fn_stream()`/`try_fn_stream()`"
+            ACTIVE_STREAM_INNER.get() == std::ptr::from_ref(*this.inner).cast::<()>(),
+            "StreamEmitter::emit().await should only be called in the context of the corresponding `fn_stream()`/`try_fn_stream()`"
         );
+        // SAFETY:
+        // 1) we hold a unique reference to `this.inner` since we verified that ACTIVE_STREAM_INNER == self.inner
+        //    - we're calling `{Try,}FnStream::poll_next` in this thread, which holds the only other reference to the same instance of `Inner<T>`
+        //    - `{Try,}FnStream::poll_next` is not holding a reference to `self.inner` during the call to `fut.poll`
+        // 2) `this.inner` is not deallocated for the duration of this method
+        let inner = unsafe { &mut *this.inner.get() };
 
         if let Some(value) = this.value.take() {
             inner.pending_values.push(value);
@@ -347,7 +397,7 @@ impl<T> Future for EmitFuture<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::ErrorKind;
+    use std::{io::ErrorKind, pin::pin};
 
     use futures_util::{pin_mut, stream::FuturesUnordered, StreamExt};
 
@@ -559,6 +609,114 @@ mod tests {
             }
             assert_eq!(Some(4), stream.next().await);
             assert_eq!(None, stream.next().await);
+        });
+    }
+
+    #[test]
+    fn infallible_nested_streams_work() {
+        futures_executor::block_on(async {
+            let mut stream = pin!(fn_stream(|emitter| async move {
+                for i in 0..3 {
+                    let mut stream_2 = pin!(fn_stream(|emitter| async move {
+                        for j in 0..3 {
+                            emitter.emit(j).await;
+                        }
+                    }));
+                    while let Some(item) = stream_2.next().await {
+                        emitter.emit(3 * i + item).await;
+                    }
+                }
+            }));
+            let mut sum = 0;
+            while let Some(item) = stream.next().await {
+                sum += item;
+            }
+            assert_eq!(sum, 36);
+        });
+    }
+
+    #[test]
+    fn fallible_nested_streams_work() {
+        futures_executor::block_on(async {
+            let mut stream = pin!(try_fn_stream(|emitter| async move {
+                for i in 0..3 {
+                    let mut stream_2 = pin!(try_fn_stream(|emitter| async move {
+                        for j in 0..3 {
+                            emitter.emit(j).await;
+                        }
+                        Ok::<_, ()>(())
+                    }));
+                    while let Some(Ok(item)) = stream_2.next().await {
+                        emitter.emit(3 * i + item).await;
+                    }
+                }
+                Ok::<_, ()>(())
+            }));
+            let mut sum = 0;
+            while let Some(Ok(item)) = stream.next().await {
+                sum += item;
+            }
+            assert_eq!(sum, 36);
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "StreamEmitter::emit().await should only be called in the context of the corresponding `fn_stream()`/`try_fn_stream()`"
+    )]
+    fn infallible_bad_nested_emit_detected() {
+        futures_executor::block_on(async {
+            let mut stream = pin!(fn_stream(|emitter| async move {
+                for i in 0..3 {
+                    let emitter_ref = &emitter;
+                    let mut stream_2 = pin!(fn_stream(|emitter_2| async move {
+                        emitter_2.emit(0).await;
+                        for j in 0..3 {
+                            emitter_ref.emit(j).await;
+                        }
+                    }));
+                    while let Some(item) = stream_2.next().await {
+                        emitter.emit(3 * i + item).await;
+                    }
+                }
+            }));
+
+            let mut sum = 0;
+            while let Some(item) = stream.next().await {
+                sum += item;
+            }
+            assert_eq!(sum, 36);
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "StreamEmitter::emit().await should only be called in the context of the corresponding `fn_stream()`/`try_fn_stream()`"
+    )]
+    fn fallible_bad_nested_emit_detected() {
+        futures_executor::block_on(async {
+            let mut stream = pin!(try_fn_stream(|emitter| async move {
+                for i in 0..3 {
+                    let emitter_ref = &emitter;
+                    let mut stream_2 = pin!(try_fn_stream(|emitter_2| async move {
+                        emitter_2.emit(0).await;
+                        for j in 0..3 {
+                            emitter_ref.emit(j).await;
+                        }
+                        Ok::<_, ()>(())
+                    }));
+                    while let Some(Ok(item)) = stream_2.next().await {
+                        emitter.emit(3 * i + item).await;
+                    }
+                }
+                Ok::<_, ()>(())
+            }));
+
+            let mut sum = 0;
+            while let Some(Ok(item)) = stream.next().await {
+                sum += item;
+            }
+            assert_eq!(sum, 36);
         });
     }
 }
