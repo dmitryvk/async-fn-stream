@@ -61,6 +61,29 @@ struct Inner<T> {
     pending_wakers: SmallVec<[Waker; 1]>,
 }
 
+/// SAFETY: `FnStream` implements own synchronization
+unsafe impl<T: Send, Fut: Future<Output = ()> + Send> Send for FnStream<T, Fut> {}
+/// SAFETY: `TryFnStream` implements own synchronization
+unsafe impl<T: Send, E: Send, Fut: Future<Output = Result<(), E>> + Send> Send
+    for TryFnStream<T, E, Fut>
+{
+}
+/// SAFETY: `StreamEmitter` implements own synchronization
+unsafe impl<T: Send> Send for StreamEmitter<T> {}
+/// SAFETY: `TryStreamEmitter` implements own synchronization
+unsafe impl<T: Send, E: Send> Send for TryStreamEmitter<T, E> {}
+/// SAFETY: `FnStream` implements own synchronization
+unsafe impl<T: Send, Fut: Future<Output = ()> + Send> Sync for FnStream<T, Fut> {}
+/// SAFETY: `TryFnStream` implements own synchronization
+unsafe impl<T: Send, E: Send, Fut: Future<Output = Result<(), E>> + Send> Sync
+    for TryFnStream<T, E, Fut>
+{
+}
+/// SAFETY: `StreamEmitter` implements own synchronization
+unsafe impl<T: Send> Sync for StreamEmitter<T> {}
+/// SAFETY: `TryStreamEmitter` implements own synchronization
+unsafe impl<T: Send, E: Send> Sync for TryStreamEmitter<T, E> {}
+
 pin_project! {
     /// Implementation of [`Stream`] trait created by [`fn_stream`].
     pub struct FnStream<T, Fut: Future<Output = ()>> {
