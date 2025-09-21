@@ -22,26 +22,35 @@ pub struct TryStreamEmitter<T, E> {
 }
 
 thread_local! {
-    static POLLING_INNER: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
+    /// A type-erased pointer to the `Inner<_>`, for which a call to `Stream::poll_next` is active.
+    static ACTIVE_STREAM_INNER: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
 }
 
-struct PollingInnerPtrGuard {
+/// A guard that ensures that the value `ACTIVE_STREAM_INNER` is returned to its previous value in case of unwinding.
+struct ActiveStreamPointerGuard {
     old_ptr: *const (),
 }
 
-impl PollingInnerPtrGuard {
-    fn set_inner_ptr(ptr: *const ()) -> Self {
-        let old_ptr = POLLING_INNER.with(|thread_ptr| thread_ptr.replace(ptr));
+impl ActiveStreamPointerGuard {
+    fn set_active_ptr(ptr: *const ()) -> Self {
+        let old_ptr = ACTIVE_STREAM_INNER.with(|thread_ptr| thread_ptr.replace(ptr));
         Self { old_ptr }
     }
 }
 
-impl Drop for PollingInnerPtrGuard {
+impl Drop for ActiveStreamPointerGuard {
     fn drop(&mut self) {
-        POLLING_INNER.with(|thread_ptr| thread_ptr.set(self.old_ptr));
+        ACTIVE_STREAM_INNER.with(|thread_ptr| thread_ptr.set(self.old_ptr));
     }
 }
 
+/// SAFETY:
+/// `Inner<T>` stores the state shared between `StreamEmitter`/`TryStreamEmitter` and `FnStream`/`TryFnStream`.
+/// It is stored within `Arc<UnsafeCell<_>>`. Exclusive access to it is controlled using:
+/// 1) exclusive reference `Pin<&mut FnStream>` which is provided to `FnStream::poll_next`
+/// 2) `ACTIVE_STREAM_INNER`, which is itself managed by `FnStream::poll_next`.
+///    - `ACTIVE_STREAM_INNER` is only set when the corresponding `Pin<&mut FnStream>` is on the stack
+///    - `EmitFuture` can safely access its inner reference if it equals to `ACTIVE_STREAM_INNER` (all other accesses are invalid and lead to panics)
 struct Inner<T> {
     // `stream_waker` is used to compare the waker of the stream future with the waker of the `Emit` future.
     // If the stream implementation does not have sub-executors, we don't have to push wakers to `pending_wakers`, which avoids cloning it.
@@ -57,11 +66,6 @@ pin_project! {
     pub struct FnStream<T, Fut: Future<Output = ()>> {
         #[pin]
         fut: Fut,
-        // SAFETY: the cell may only be accessed from FnStream::poll_next or from FnStream's closure
-        // 1) in case of FnStream::poll_next, the access is protected due to the fact that we have Pin<&mut FnStream>
-        // 2) in case of FnStream's closure, the access is protected via the `POLLING_INNER` pointer:
-        //    - this pointer is only set within `FnStream::poll_next`, when unique reference is guaranteed
-        //    - `PollingInnerPtrGuard` guarantees that the pointer is unset outside of `FnStream::poll_next`
         inner: Arc<UnsafeCell<Inner<T>>>,
     }
 }
@@ -116,11 +120,9 @@ impl<T, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
         let this = self.project();
 
         // SAFETY:
-        // 1) we have no aliasing, since:
-        //    - we're holding unique reference to `Self`, and
-        //    - we haven't yet put the pointer into `POLLING_INNER`
-        //    - this reference to `this.inner` is dropped before putting the pointer into `POLLING_INNER`
-        // 2) `this.inner` is not deallocated since we're holding `Pin<&mut Self>`
+        // (see safety comment for `Inner<T>`)
+        // 1) we have no aliasing, since we're holding unique reference to `Self`, and
+        // 2) `this.inner` is not deallocated for the duration of this method
         let inner = unsafe { &mut *this.inner.get() };
         if let Some(value) = inner.pending_values.pop() {
             return Poll::Ready(Some(value));
@@ -141,17 +143,20 @@ impl<T, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
         // SAFETY: ensure that we're not holding a reference to this.inner
         _ = inner;
 
-        // SAFETY: `POLLING_INNER` contains valid pointer to `this.inner` during the call to `fut.poll` and is restored after the call due to the use of guard
+        // SAFETY for Inner<T>:
+        // - `ACTIVE_STREAM_INNER` now contains valid pointer to `this.inner` during the call to `fut.poll`
+        // - `ACTIVE_STREAM_INNER` is restored after the call due to the use of guard
         let polling_ptr_guard =
-            PollingInnerPtrGuard::set_inner_ptr(Arc::as_ptr(&*this.inner).cast());
+            ActiveStreamPointerGuard::set_active_ptr(Arc::as_ptr(&*this.inner).cast());
         let r = this.fut.poll(cx);
         drop(polling_ptr_guard);
 
         // SAFETY:
+        // (see safety comment for `Inner<T>`)
         // 1) we have no aliasing, since:
         //    - we're holding unique reference to `Self`, and
-        //    - we removed the pointer from `POLLING_INNER`
-        // 2) `this.inner` is not deallocated since we're holding `Pin<&mut Self>`
+        //    - we removed the pointer from `ACTIVE_STREAM_INNER`
+        // 2) `this.inner` is not deallocated for the duration of this method
         let inner = unsafe { &mut *this.inner.get() };
 
         match r {
@@ -243,11 +248,9 @@ impl<T, E, Fut: Future<Output = Result<(), E>>> Stream for TryFnStream<T, E, Fut
         }
         let this = self.project();
         // SAFETY:
-        // 1) we have no aliasing, since:
-        //    - we're holding unique reference to `Self`, and
-        //    - we haven't yet put the pointer into `POLLING_INNER`
-        //    - this reference to `this.inner` is dropped before putting the pointer into `POLLING_INNER`
-        // 2) `this.inner` is not deallocated since we're holding `Pin<&mut Self>`
+        // (see safety comment for `Inner<T>`)
+        // 1) we have no aliasing, since we're holding unique reference to `Self`, and
+        // 2) `this.inner` is not deallocated for the duration of this method
         let inner = unsafe { &mut *this.inner.get() };
         if let Some(value) = inner.pending_values.pop() {
             return Poll::Ready(Some(value));
@@ -268,17 +271,20 @@ impl<T, E, Fut: Future<Output = Result<(), E>>> Stream for TryFnStream<T, E, Fut
         // SAFETY: ensure that we're not holding a reference to this.inner
         _ = inner;
 
-        // SAFETY: `POLLING_INNER` contains valid pointer to `this.inner` during the call to `fut.poll` and is restored after the call due to the use of guard
+        // SAFETY for Inner<T>:
+        // - `ACTIVE_STREAM_INNER` now contains valid pointer to `this.inner` during the call to `fut.poll`
+        // - `ACTIVE_STREAM_INNER` is restored after the call due to the use of guard
         let polling_ptr_guard =
-            PollingInnerPtrGuard::set_inner_ptr(Arc::as_ptr(&*this.inner).cast());
+            ActiveStreamPointerGuard::set_active_ptr(Arc::as_ptr(&*this.inner).cast());
         let r = this.fut.poll(cx);
         drop(polling_ptr_guard);
 
         // SAFETY:
+        // (see safety comment for `Inner<T>`)
         // 1) we have no aliasing, since:
         //    - we're holding unique reference to `Self`, and
-        //    - we removed the pointer from `POLLING_INNER`
-        // 2) `this.inner` is not deallocated since we're holding `Pin<&mut Self>`
+        //    - we removed the pointer from `ACTIVE_STREAM_INNER`
+        // 2) `this.inner` is not deallocated for the duration of this method
         let inner = unsafe { &mut *this.inner.get() };
         match r {
             std::task::Poll::Ready(Ok(())) => Poll::Ready(None),
@@ -357,15 +363,14 @@ impl<T> Future for EmitFuture<'_, T> {
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
         assert!(
-            POLLING_INNER.get() == std::ptr::from_ref(*this.inner).cast::<()>(),
-            "StreamEmitter::emit().await should only be called in context of its corresponding `fn_stream()`/`try_fn_stream()`"
+            ACTIVE_STREAM_INNER.get() == std::ptr::from_ref(*this.inner).cast::<()>(),
+            "StreamEmitter::emit().await should only be called in the context of the corresponding `fn_stream()`/`try_fn_stream()`"
         );
         // SAFETY:
-        // 1) we have no aliasing for `self.inner` since:
-        //    - we verified that POLLING_INNER == self.inner, which means that
-        //    - we're calling `{Try,}FnStream::poll_next` in this thread; and
+        // 1) we hold a unique reference to `this.inner` since we verified that ACTIVE_STREAM_INNER == self.inner
+        //    - we're calling `{Try,}FnStream::poll_next` in this thread, which holds the only other reference to the same instance of `Inner<T>`
         //    - `{Try,}FnStream::poll_next` is not holding a reference to `self.inner` during the call to `fut.poll`
-        // 2) `self.inner` is not deallocated for the durgion for `EmitFuture::poll`
+        // 2) `this.inner` is not deallocated for the durgion for `EmitFuture::poll`
         let inner = unsafe { &mut *this.inner.get() };
 
         if let Some(value) = this.value.take() {
@@ -657,7 +662,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "StreamEmitter::emit().await should only be called in context of its corresponding `fn_stream()`/`try_fn_stream()`"
+        expected = "StreamEmitter::emit().await should only be called in the context of the corresponding `fn_stream()`/`try_fn_stream()`"
     )]
     fn infallible_bad_nested_emit_detected() {
         futures_executor::block_on(async {
@@ -686,7 +691,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "StreamEmitter::emit().await should only be called in context of its corresponding `fn_stream()`/`try_fn_stream()`"
+        expected = "StreamEmitter::emit().await should only be called in the context of the corresponding `fn_stream()`/`try_fn_stream()`"
     )]
     fn fallible_bad_nested_emit_detected() {
         futures_executor::block_on(async {
