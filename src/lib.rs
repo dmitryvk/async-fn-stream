@@ -176,8 +176,8 @@ impl<T, Fut: Future<Output = ()>> Stream for FnStream<T, Fut> {
 ///
 /// Caller should pass an async function which can:
 ///
-/// - return successive stream elements via [`StreamEmitter::emit`]
-/// - return transient errors via [`StreamEmitter::emit_err`]
+/// - return successive stream elements via [`TryStreamEmitter::emit`]
+/// - return transient errors via [`TryStreamEmitter::emit_err`]
 /// - return fatal errors as [`Result::Err`]
 ///
 /// # Example
