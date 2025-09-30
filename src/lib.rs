@@ -2,6 +2,7 @@
 
 use std::{
     cell::{Cell, UnsafeCell},
+    panic::{RefUnwindSafe, UnwindSafe},
     pin::Pin,
     sync::Arc,
     task::{Poll, Waker},
@@ -61,28 +62,51 @@ struct Inner<T> {
     pending_wakers: SmallVec<[Waker; 1]>,
 }
 
-/// SAFETY: `FnStream` implements own synchronization
+// SAFETY: `FnStream` implements own synchronization
 unsafe impl<T: Send, Fut: Future<Output = ()> + Send> Send for FnStream<T, Fut> {}
-/// SAFETY: `TryFnStream` implements own synchronization
+// SAFETY: `FnStream` implements own synchronization
+unsafe impl<T: Send, Fut: Future<Output = ()> + Sync> Sync for FnStream<T, Fut> {}
+impl<T: UnwindSafe, Fut: Future<Output = ()> + UnwindSafe> UnwindSafe for FnStream<T, Fut> {}
+impl<T: RefUnwindSafe, Fut: Future<Output = ()> + RefUnwindSafe> RefUnwindSafe
+    for FnStream<T, Fut>
+{
+}
+// SAFETY: `TryFnStream` implements own synchronization
 unsafe impl<T: Send, E: Send, Fut: Future<Output = Result<(), E>> + Send> Send
     for TryFnStream<T, E, Fut>
 {
 }
-/// SAFETY: `StreamEmitter` implements own synchronization
-unsafe impl<T: Send> Send for StreamEmitter<T> {}
-/// SAFETY: `TryStreamEmitter` implements own synchronization
-unsafe impl<T: Send, E: Send> Send for TryStreamEmitter<T, E> {}
-/// SAFETY: `FnStream` implements own synchronization
-unsafe impl<T: Send, Fut: Future<Output = ()> + Send> Sync for FnStream<T, Fut> {}
-/// SAFETY: `TryFnStream` implements own synchronization
-unsafe impl<T: Send, E: Send, Fut: Future<Output = Result<(), E>> + Send> Sync
+// SAFETY: `TryFnStream` implements own synchronization
+unsafe impl<T: Send, E: Send, Fut: Future<Output = Result<(), E>> + Sync> Sync
     for TryFnStream<T, E, Fut>
 {
 }
-/// SAFETY: `StreamEmitter` implements own synchronization
+impl<T: UnwindSafe, E: UnwindSafe, Fut: Future<Output = Result<(), E>> + UnwindSafe> UnwindSafe
+    for TryFnStream<T, E, Fut>
+{
+}
+impl<T: RefUnwindSafe, E: RefUnwindSafe, Fut: Future<Output = Result<(), E>> + RefUnwindSafe>
+    RefUnwindSafe for TryFnStream<T, E, Fut>
+{
+}
+// SAFETY: `StreamEmitter` implements own synchronization
+unsafe impl<T: Send> Send for StreamEmitter<T> {}
+// SAFETY: `StreamEmitter` implements own synchronization
 unsafe impl<T: Send> Sync for StreamEmitter<T> {}
-/// SAFETY: `TryStreamEmitter` implements own synchronization
+impl<T: UnwindSafe> UnwindSafe for StreamEmitter<T> {}
+impl<T: RefUnwindSafe> RefUnwindSafe for StreamEmitter<T> {}
+// SAFETY: `TryStreamEmitter` implements own synchronization
+unsafe impl<T: Send, E: Send> Send for TryStreamEmitter<T, E> {}
+// SAFETY: `TryStreamEmitter` implements own synchronization
 unsafe impl<T: Send, E: Send> Sync for TryStreamEmitter<T, E> {}
+impl<T: UnwindSafe, E: UnwindSafe> UnwindSafe for TryStreamEmitter<T, E> {}
+impl<T: RefUnwindSafe, E: RefUnwindSafe> RefUnwindSafe for TryStreamEmitter<T, E> {}
+// SAFETY: `EmitFuture` implements own synchronization.
+unsafe impl<T: Send> Send for EmitFuture<'_, T> {}
+// SAFETY: `EmitFuture` implements own synchronization
+unsafe impl<T: Send> Sync for EmitFuture<'_, T> {}
+impl<T: UnwindSafe> UnwindSafe for EmitFuture<'_, T> {}
+impl<T: RefUnwindSafe> RefUnwindSafe for EmitFuture<'_, T> {}
 
 pin_project! {
     /// Implementation of [`Stream`] trait created by [`fn_stream`].
