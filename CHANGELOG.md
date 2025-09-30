@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2025-09-30
+
+### 🐛 Bug Fixes
+
+- Restore Send and Sync for streams (#13)
+- Add missing auto-traits
+
+### 📚 Documentation
+
+- Fix intra-doc links
+
+### ⚡ Performance
+
+- Don't use mutex (#12)
+
 ## [0.3.0] - 2025-09-05
 
 ### 🚀 Features
