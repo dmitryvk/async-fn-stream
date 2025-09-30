@@ -42,3 +42,10 @@ jobs:
         with:
           components: miri
       - run: cargo miri test
+  semver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check semver
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+
