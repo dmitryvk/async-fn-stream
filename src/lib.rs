@@ -546,7 +546,7 @@ mod tests {
                     .await;
                 eprintln!("try stream 4");
                 emitter
-                    .emit_err(std::io::Error::from(ErrorKind::Other))
+                    .emit_result(Err(std::io::Error::from(ErrorKind::Other)))
                     .await;
                 eprintln!("try stream 5");
                 Err(std::io::Error::from(ErrorKind::Other))
