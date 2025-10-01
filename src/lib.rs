@@ -355,7 +355,6 @@ impl<T> StreamEmitter<T> {
     ///
     /// # Panics
     /// Will panic if:
-    /// * `emit` is called twice without awaiting result of first call
     /// * `emit` is called not in context of polling the stream
     #[must_use = "Ensure that emit() is awaited"]
     pub fn emit(&'_ self, value: T) -> EmitFuture<'_, T> {
@@ -368,18 +367,26 @@ impl<T, E> TryStreamEmitter<T, E> {
     ///
     /// # Panics
     /// Will panic if:
-    /// * `emit`/`emit_err` is called twice without awaiting result of the first call
     /// * `emit` is called not in context of polling the stream
     #[must_use = "Ensure that emit() is awaited"]
     pub fn emit(&'_ self, value: T) -> EmitFuture<'_, Result<T, E>> {
         EmitFuture::new(&self.inner, Ok(value))
     }
 
+    /// Emit value from a stream and wait until stream consumer calls [`futures_util::StreamExt::next`] again.
+    ///
+    /// # Panics
+    /// Will panic if:
+    /// * `emit_result` is called not in context of polling the stream
+    #[must_use = "Ensure that emit() is awaited"]
+    pub fn emit_result(&'_ self, value: Result<T, E>) -> EmitFuture<'_, Result<T, E>> {
+        EmitFuture::new(&self.inner, value)
+    }
+
     /// Emit error from a stream and wait until stream consumer calls [`futures_util::StreamExt::next`] again.
     ///
     /// # Panics
     /// Will panic if:
-    /// * `emit`/`emit_err` is called twice without awaiting result of the first call
     /// * `emit_err` is called not in context of polling the stream
     #[must_use = "Ensure that emit_err() is awaited"]
     pub fn emit_err(&'_ self, err: E) -> EmitFuture<'_, Result<T, E>> {
@@ -532,17 +539,22 @@ mod tests {
                 eprintln!("try stream 1");
                 emitter.emit(1).await;
                 eprintln!("try stream 2");
-                emitter.emit(2).await;
+                emitter.emit_result(Ok(2)).await;
                 eprintln!("try stream 3");
                 emitter
                     .emit_err(std::io::Error::from(ErrorKind::Other))
                     .await;
                 eprintln!("try stream 4");
+                emitter
+                    .emit_err(std::io::Error::from(ErrorKind::Other))
+                    .await;
+                eprintln!("try stream 5");
                 Err(std::io::Error::from(ErrorKind::Other))
             });
             pin_mut!(stream);
             assert_eq!(1, stream.next().await.unwrap().unwrap());
             assert_eq!(2, stream.next().await.unwrap().unwrap());
+            assert!(stream.next().await.unwrap().is_err());
             assert!(stream.next().await.unwrap().is_err());
             assert!(stream.next().await.unwrap().is_err());
             assert!(stream.next().await.is_none());
