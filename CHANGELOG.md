@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2025-10-08
+
+### 🚀 Features
+
+- Support `emit_result` for `try_fn_stream` (#16)
+
 ## [0.3.1] - 2025-09-30
 
 ### 🐛 Bug Fixes

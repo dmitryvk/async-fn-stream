@@ -1,7 +1,7 @@
 [package]
 name = "async-fn-stream"
 description = "Lightweight implementation of `async-stream` without macros"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 license = "MIT"
 homepage = "https://github.com/dmitryvk/async-fn-stream"
